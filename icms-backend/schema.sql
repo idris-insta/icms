@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS import_orders (
   demurrage_rate          DECIMAL(10,2)  DEFAULT 0,
   container_returned_date DATE,
   doc_checklist           JSONB          DEFAULT '{}'::jsonb,
+  shipped                 BOOLEAN        DEFAULT FALSE,
+  delivered               BOOLEAN        DEFAULT FALSE,
   created_at              TIMESTAMPTZ    DEFAULT NOW(),
   updated_at              TIMESTAMPTZ    DEFAULT NOW()
 );
