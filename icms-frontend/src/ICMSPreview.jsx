@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
 
 // ─── API CLIENT ───────────────────────────────────────────────────────────────
-const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:3001") + "/api";
+const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:5000") + "/api";
 
 const apiFetch = async (path, options = {}) => {
   const token = localStorage.getItem("icms_token");
