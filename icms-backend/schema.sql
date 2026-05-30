@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS suppliers (
   contact_phone       VARCHAR(50),
   payment_terms_days  INTEGER      DEFAULT 30,
   is_active           BOOLEAN      DEFAULT true,
+  port                VARCHAR(100),
+  avg_value_usd       DECIMAL(12,2) DEFAULT 0,
+  ex_rate             DECIMAL(10,4) DEFAULT 84,
+  duty_percent        DECIMAL(5,2)  DEFAULT 10,
+  expense_inr         DECIMAL(12,2) DEFAULT 0,
+  target_per_month    DECIMAL(10,2) DEFAULT 1,
   created_at          TIMESTAMPTZ  DEFAULT NOW(),
   updated_at          TIMESTAMPTZ  DEFAULT NOW()
 );
