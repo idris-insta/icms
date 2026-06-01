@@ -8,17 +8,27 @@ router.get('/supplier-summary', protect, async (req, res) => {
     const { rows } = await db.query(`
       SELECT
         s.name AS supplier, s.base_currency AS currency,
-        COUNT(o.id) FILTER (WHERE o.status NOT IN ('Shipped','In Transit','Arrived','Delivered')) AS pending_pos,
-        COALESCE(SUM(o.total_value) FILTER (WHERE o.status NOT IN ('Shipped','In Transit','Arrived','Delivered')), 0) AS pending_value,
-        COUNT(o.id) FILTER (WHERE o.status IN ('Shipped','In Transit'))  AS shipped_pos,
-        COALESCE(SUM(o.total_value) FILTER (WHERE o.status IN ('Shipped','In Transit')), 0)  AS shipped_value,
-        COALESCE(SUM(o.total_value) FILTER (WHERE o.status = 'Delivered'), 0) AS delivered_value,
-        COALESCE(SUM(o.total_value), 0) - COALESCE(SUM(p.amount), 0)    AS balance_due
+        COALESCE(o_agg.pending_pos,      0)::int AS pending_pos,
+        COALESCE(o_agg.pending_value,    0)       AS pending_value,
+        COALESCE(o_agg.shipped_pos,      0)::int  AS shipped_pos,
+        COALESCE(o_agg.shipped_value,    0)       AS shipped_value,
+        COALESCE(o_agg.delivered_value,  0)       AS delivered_value,
+        COALESCE(o_agg.total_value,      0) - COALESCE(p_agg.total_paid, 0) AS balance_due
       FROM suppliers s
-      LEFT JOIN import_orders o ON o.supplier_id = s.id
-      LEFT JOIN payments p ON p.supplier_id = s.id
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) FILTER (WHERE status NOT IN ('Shipped','In Transit','Arrived','Delivered')) AS pending_pos,
+          COALESCE(SUM(total_value) FILTER (WHERE status NOT IN ('Shipped','In Transit','Arrived','Delivered')), 0) AS pending_value,
+          COUNT(*) FILTER (WHERE status IN ('Shipped','In Transit'))                            AS shipped_pos,
+          COALESCE(SUM(total_value) FILTER (WHERE status IN ('Shipped','In Transit')), 0)       AS shipped_value,
+          COALESCE(SUM(total_value) FILTER (WHERE status = 'Delivered'), 0)                     AS delivered_value,
+          COALESCE(SUM(total_value), 0)                                                         AS total_value
+        FROM import_orders WHERE supplier_id = s.id
+      ) o_agg ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
+      ) p_agg ON true
       WHERE s.is_active = true
-      GROUP BY s.id, s.name, s.base_currency
       ORDER BY s.name
     `);
     res.json({ data: rows });

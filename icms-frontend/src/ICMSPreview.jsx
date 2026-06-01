@@ -962,7 +962,7 @@ const ImportOrders = () => {
         apiFetch("/masters/skus"),
         apiFetch("/orders/supplier-summary"),
       ]);
-      setOrders(oRes.orders); setSuppliers(sRes.suppliers); setSkus(skuRes.skus);
+      setOrders(oRes.orders || []); setSuppliers(sRes.suppliers || []); setSkus(skuRes.skus || []);
       setSupplierSummary(supSumRes.suppliers || []);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -1668,7 +1668,7 @@ const Kanban = () => {
             </table>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
               <button onClick={() => setQtyModal(null)} style={{ padding: "8px 18px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Cancel</button>
-              <button onClick={() => commitStatus(qtyModal.card, qtyModal.fromCol, qtyModal.toCol)} style={{ padding: "8px 18px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Skip (no changes)</button>
+              <button onClick={async () => { await commitStatus(qtyModal.card, qtyModal.fromCol, qtyModal.toCol); setQtyModal(null); }} style={{ padding: "8px 18px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 13 }}>Skip (no changes)</button>
               <button onClick={confirmQtyAndMove} disabled={savingQty} style={{ padding: "8px 18px", background: "#3b82f6", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, color: "#fff", fontWeight: 600 }}>{savingQty ? "Saving…" : "Confirm & Move"}</button>
             </div>
           </div>
@@ -1762,7 +1762,9 @@ const Financial = () => {
     e.preventDefault(); setSaving(true); setError("");
     try {
       await apiFetch("/financial/payments", { method: "POST", body: JSON.stringify({ ...form, amount: parseFloat(form.amount), order_id: parseInt(form.order_id), supplier_id: parseInt(form.supplier_id) }) });
-      setShowForm(false); load(); toast("Payment recorded successfully", "success");
+      setShowForm(false);
+      setForm({ reference: "", order_id: "", supplier_id: "", amount: "", currency: "USD", payment_date: new Date().toISOString().split("T")[0], payment_type: "TT", notes: "" });
+      load(); toast("Payment recorded successfully", "success");
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   };
@@ -2034,7 +2036,7 @@ const Masters = () => {
     setLoading(true); setError("");
     try {
       const [sRes, supRes, pRes] = await Promise.all([apiFetch("/masters/skus"), apiFetch("/masters/suppliers"), apiFetch("/masters/ports")]);
-      setSkus(sRes.skus); setSuppliers(supRes.suppliers); setPorts(pRes.ports);
+      setSkus(sRes.skus || []); setSuppliers(supRes.suppliers || []); setPorts(pRes.ports || []);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -2247,7 +2249,7 @@ const Documents = () => {
     setLoading(true); setError("");
     try {
       const [dRes, oRes] = await Promise.all([apiFetch("/documents"), apiFetch("/orders")]);
-      setDocs(dRes.documents); setOrders(oRes.orders);
+      setDocs(dRes.documents || []); setOrders(oRes.orders || []);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }, []);
@@ -2445,7 +2447,7 @@ const Settings = () => {
   const [success, setSuccess]   = useState("");
 
   useEffect(() => {
-    apiFetch("/settings").then(r => setSettings(r.settings)).catch(e => setError(e.message)).finally(() => setLoading(false));
+    apiFetch("/settings").then(r => setSettings(r.settings || {})).catch(e => setError(e.message)).finally(() => setLoading(false));
   }, []);
 
   const save = async () => {

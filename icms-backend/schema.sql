@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   thickness     VARCHAR(50)    DEFAULT '',
   size          VARCHAR(100)   DEFAULT '',
   liner_color   VARCHAR(50)    DEFAULT '',
+  qty_ctn       INTEGER        DEFAULT 0,
   total_ctn     INTEGER        DEFAULT 0,
   total_roll    INTEGER        DEFAULT 0,
   unit_price    DECIMAL(12,4)  DEFAULT 0,

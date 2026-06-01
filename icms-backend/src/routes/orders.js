@@ -292,7 +292,8 @@ router.put('/:id', protect, async (req, res) => {
   const totals = (items && items.length) ? calcTotals(items) : { total_quantity, total_weight, total_cbm, total_value };
 
   // Auto-calc due date if shipment_date provided and no explicit due date
-  let dueDateVal = payment_due_date !== undefined ? (payment_due_date || null) : undefined;
+  const dueDateProvided = payment_due_date !== undefined;
+  let dueDateVal = dueDateProvided ? (payment_due_date || null) : undefined;
   if (dueDateVal === undefined && shipment_date) {
     const sid = supplier_id || (await db.query('SELECT supplier_id FROM import_orders WHERE id=$1', [req.params.id])).rows[0]?.supplier_id;
     if (sid) {
@@ -325,7 +326,7 @@ router.put('/:id', protect, async (req, res) => {
         etd                    = COALESCE($13, etd),
         bl_number              = COALESCE($14, bl_number),
         shipment_date          = COALESCE($15, shipment_date),
-        payment_due_date       = COALESCE($16, payment_due_date),
+        payment_due_date       = CASE WHEN $28 THEN $16 ELSE payment_due_date END,
         freight_cost           = COALESCE($18, freight_cost),
         insurance_cost         = COALESCE($19, insurance_cost),
         duty_rate              = COALESCE($20, duty_rate),
@@ -350,7 +351,8 @@ router.put('/:id', protect, async (req, res) => {
         doc_checklist ? JSON.stringify(doc_checklist) : null,
         priority ?? null,
         shipped !== undefined ? shipped : null,
-        delivered !== undefined ? delivered : null]);
+        delivered !== undefined ? delivered : null,
+        dueDateProvided]);
     if (items) await saveItems(client, req.params.id, items);
     await client.query('COMMIT');
     const { rows } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [req.params.id]);

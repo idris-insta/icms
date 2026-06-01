@@ -1,6 +1,7 @@
-const router  = require('express').Router();
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 // GET /api/financial/payments — payments made + payments due
 router.get('/payments', protect, async (req, res) => {
@@ -17,13 +18,14 @@ router.get('/payments', protect, async (req, res) => {
       db.query(`
         SELECT o.id, o.po_number, s.name AS supplier,
                o.total_value - COALESCE(SUM(p.amount), 0) AS balance,
-               (o.created_at::date + s.payment_terms_days)       AS due_date,
-               (o.created_at::date + s.payment_terms_days) < CURRENT_DATE AS is_overdue
+               o.payment_due_date                          AS due_date,
+               o.payment_due_date < CURRENT_DATE           AS is_overdue
         FROM import_orders o
         JOIN suppliers s ON o.supplier_id = s.id
         LEFT JOIN payments p ON p.order_id = o.id
         WHERE o.status NOT IN ('Delivered')
-        GROUP BY o.id, o.po_number, s.name, o.total_value, o.created_at, s.payment_terms_days
+          AND o.payment_due_date IS NOT NULL
+        GROUP BY o.id, o.po_number, s.name, o.total_value, o.payment_due_date
         HAVING o.total_value - COALESCE(SUM(p.amount), 0) > 0
         ORDER BY due_date ASC
       `),
@@ -58,7 +60,7 @@ router.get('/supplier-accounts', protect, async (req, res) => {
     const { rows } = await db.query(`
       SELECT s.id, s.name, s.code, s.base_currency, s.payment_terms_days,
              COUNT(DISTINCT o.id)::int                           AS order_count,
-             COALESCE(SUM(DISTINCT o.total_value), 0)           AS total_invoiced,
+             COALESCE(SUM(o.total_value), 0)                    AS total_invoiced,
              COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.supplier_id = s.id), 0) AS total_paid
       FROM suppliers s
       LEFT JOIN import_orders o ON o.supplier_id = s.id
@@ -129,7 +131,7 @@ router.get('/due-alerts', protect, async (req, res) => {
 });
 
 // DELETE /api/financial/payments/:id
-router.delete('/payments/:id', protect, async (req, res) => {
+router.delete('/payments/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM payments WHERE id = $1 RETURNING id', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Payment not found' });

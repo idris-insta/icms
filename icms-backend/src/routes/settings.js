@@ -1,6 +1,7 @@
-const router  = require('express').Router();
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 // GET /api/settings
 router.get('/', protect, async (req, res) => {
@@ -13,7 +14,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // PUT /api/settings — body: { key: value, ... }
-router.put('/', protect, async (req, res) => {
+router.put('/', protect, authorize('owner'), async (req, res) => {
   const entries = Object.entries(req.body);
   if (!entries.length) return res.status(400).json({ error: 'No settings provided' });
   try {

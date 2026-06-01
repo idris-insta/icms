@@ -5,7 +5,16 @@ const path    = require('path');
 
 const app = express();
 
-app.use(cors({ origin: '*' }));
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:4173'];
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -34,6 +43,12 @@ app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400) {
+    return res.status(400).json({ error: 'Invalid JSON in request body' });
+  }
+  if (err.message === 'Not allowed by CORS') {
+    return res.status(403).json({ error: 'CORS: origin not allowed' });
+  }
   console.error(err);
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
