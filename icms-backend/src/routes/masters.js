@@ -298,4 +298,27 @@ router.post('/ports', protect, async (req, res) => {
   }
 });
 
+router.put('/ports/:id', protect, async (req, res) => {
+  const { name, country, port_type } = req.body;
+  try {
+    const { rows } = await db.query(`
+      UPDATE ports SET
+        name      = COALESCE($1, name),
+        country   = COALESCE($2, country),
+        port_type = COALESCE($3, port_type)
+      WHERE id = $4 RETURNING *
+    `, [name || null, country || null, port_type || null, req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Port not found' });
+    res.json(rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.delete('/ports/:id', protect, async (req, res) => {
+  try {
+    const { rows } = await db.query('DELETE FROM ports WHERE id = $1 RETURNING id', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Port not found' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;

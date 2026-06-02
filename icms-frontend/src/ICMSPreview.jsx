@@ -506,8 +506,6 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
     demurrage_rate: order?.demurrage_rate != null ? order.demurrage_rate : "",
     container_returned_date: order?.container_returned_date ? order.container_returned_date.split("T")[0] : "",
     doc_checklist: order?.doc_checklist || {},
-    shipped:       order?.shipped   || false,
-    delivered:     order?.delivered || false,
   });
 
   // Auto-calc payment due date when shipment date or supplier changes
@@ -605,8 +603,6 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
         demurrage_rate: parseFloat(form.demurrage_rate) || 0,
         container_returned_date: form.container_returned_date || null,
         doc_checklist:  form.doc_checklist || {},
-        shipped:        !!form.shipped,
-        delivered:      !!form.delivered,
         items: validItems,
       };
       const result = isEdit
@@ -699,17 +695,6 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
               <label style={lbl}>ETA</label>
               <input style={inp} type="date" value={form.eta} onChange={e => setField("eta", e.target.value)} />
             </div>
-          </div>
-          {/* ── Shipped / Delivered flags ── */}
-          <div style={{ display: "flex", gap: 20, padding: "8px 16px", background: "#f0f9ff", border: "1px solid #e2e8f0", borderTop: "1px dashed #bae6fd", borderBottom: "none" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 12, fontWeight: form.shipped ? 700 : 400, color: form.shipped ? "#1d4ed8" : "#64748b" }}>
-              <input type="checkbox" checked={!!form.shipped} onChange={e => setField("shipped", e.target.checked)} style={{ accentColor: "#1d4ed8", width: 14, height: 14, cursor: "pointer" }} />
-              🚢 SHIPPED (BL issued)
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 12, fontWeight: form.delivered ? 700 : 400, color: form.delivered ? "#059669" : "#64748b" }}>
-              <input type="checkbox" checked={!!form.delivered} onChange={e => setField("delivered", e.target.checked)} style={{ accentColor: "#059669", width: 14, height: 14, cursor: "pointer" }} />
-              ✅ DELIVERED (cleared customs)
-            </label>
           </div>
           {/* ── BL / Shipment / Payment Due ── */}
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12, marginBottom: 20, padding: "12px 16px 16px", background: "#f8fafc", borderRadius: "0 0 10px 10px", border: "1px solid #e2e8f0", borderTop: "1px dashed #cbd5e1" }}>
@@ -1003,17 +988,6 @@ const ImportOrders = () => {
     } catch (e) { setError(e.message); }
   };
 
-  // Quick toggle shipped/delivered without opening the full form
-  const quickToggle = async (o, field) => {
-    try {
-      const updated = await apiFetch(`/orders/${o.id}`, {
-        method: "PUT",
-        body: JSON.stringify({ [field]: !o[field] }),
-      });
-      setOrders(prev => prev.map(x => x.id === updated.id ? updated : x));
-      toast(`${o.po_number} ${field} toggled`, "success");
-    } catch (e) { toast(e.message, "error"); }
-  };
 
   // Open edit form with full order (including items) pre-loaded
   const openEdit = async (o) => {
@@ -2065,7 +2039,18 @@ const Masters = () => {
       roll_weight: "", item_code: "", shipping_marks: "",
       weight_per_unit: "", cbm_per_unit: "",
     });
-    if (tab === "Suppliers") setForm(item ? { code: item.code, name: item.name, country: item.country, base_currency: item.base_currency, contact_email: item.contact_email, payment_terms_days: item.payment_terms_days } : { code: "", name: "", country: "", base_currency: "USD", contact_email: "", payment_terms_days: 30 });
+    if (tab === "Suppliers") setForm(item ? {
+      code: item.code, name: item.name, country: item.country || "",
+      base_currency: item.base_currency, contact_email: item.contact_email || "",
+      payment_terms_days: item.payment_terms_days,
+      port: item.port || "", avg_value_usd: item.avg_value_usd ?? 0,
+      ex_rate: item.ex_rate ?? 84, duty_percent: item.duty_percent ?? 10,
+      expense_inr: item.expense_inr ?? 0, target_per_month: item.target_per_month ?? 1,
+    } : {
+      code: "", name: "", country: "", base_currency: "USD", contact_email: "",
+      payment_terms_days: 30, port: "", avg_value_usd: 0,
+      ex_rate: 84, duty_percent: 10, expense_inr: 0, target_per_month: 1,
+    });
     if (tab === "Ports") setForm(item ? { code: item.code, name: item.name, country: item.country, port_type: item.port_type } : { code: "", name: "", country: "", port_type: "both" });
     setShowForm(true);
   };

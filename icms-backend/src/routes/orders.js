@@ -14,8 +14,8 @@ const ORDER_SELECT = `
          COALESCE(o.demurrage_rate,0)  AS demurrage_rate,
          o.container_returned_date,
          COALESCE(o.doc_checklist,'{}')::jsonb AS doc_checklist,
-         COALESCE(o.shipped,false)     AS shipped,
-         COALESCE(o.delivered,false)   AS delivered,
+         (o.status NOT IN ('Draft','Tentative','Confirmed')) AS shipped,
+         (o.status = 'Delivered')                          AS delivered,
          s.id AS supplier_id, s.code AS supplier_code, s.name AS supplier, s.base_currency, s.payment_terms_days
   FROM import_orders o
   JOIN suppliers s ON o.supplier_id = s.id
@@ -129,14 +129,15 @@ router.get('/supplier-summary', protect, async (req, res) => {
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $9::date AND $10::date)::int AS month_total,
         -- financial totals
         COALESCE(SUM(o.total_value), 0)           AS total_value,
-        COALESCE(SUM(p_agg.paid), 0)              AS total_paid
+        p_agg.paid                                AS total_paid
       FROM suppliers s
       LEFT JOIN import_orders o ON o.supplier_id = s.id
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE supplier_id = s.id
       ) p_agg ON true
       GROUP BY s.id, s.code, s.name, s.base_currency,
-               s.port, s.avg_value_usd, s.ex_rate, s.duty_percent, s.expense_inr, s.target_per_month
+               s.port, s.avg_value_usd, s.ex_rate, s.duty_percent, s.expense_inr, s.target_per_month,
+               p_agg.paid
       ORDER BY s.code
     `, [w1s, w1e, w2s, w2e, w3s, w3e, w4s, w4e, moStart, moEnd]);
 
@@ -258,15 +259,14 @@ router.post('/', protect, async (req, res) => {
          total_quantity, total_weight, total_cbm, total_value, utilization_percentage,
          eta, etd, bl_number, shipment_date, payment_due_date, notes,
          freight_cost, insurance_cost, duty_rate, free_days, demurrage_rate,
-         container_returned_date, doc_checklist, priority, shipped, delivered)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) RETURNING id
+         container_returned_date, doc_checklist, priority)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING id
     `, [po_number, supplier_id, container_type, currency || 'USD', status || 'Draft', marking || null,
         totals.total_quantity || 0, totals.total_weight || 0, totals.total_cbm || 0, totals.total_value || 0,
         utilization_percentage || 0, eta || null, etd || null, bl_number || null,
         shipment_date || null, dueDateVal, notes || null,
         freight_cost || 0, insurance_cost || 0, duty_rate || 0, free_days || 7, demurrage_rate || 0,
-        container_returned_date || null, doc_checklist ? JSON.stringify(doc_checklist) : '{}', priority || 'normal',
-        shipped || false, delivered || false]);
+        container_returned_date || null, doc_checklist ? JSON.stringify(doc_checklist) : '{}', priority || 'normal']);
     if (items.length) await saveItems(client, rows[0].id, items);
     await client.query('COMMIT');
     const { rows: order } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [rows[0].id]);
@@ -326,7 +326,7 @@ router.put('/:id', protect, async (req, res) => {
         etd                    = COALESCE($13, etd),
         bl_number              = COALESCE($14, bl_number),
         shipment_date          = COALESCE($15, shipment_date),
-        payment_due_date       = CASE WHEN $28 THEN $16 ELSE payment_due_date END,
+        payment_due_date       = CASE WHEN $26 THEN $16 ELSE payment_due_date END,
         freight_cost           = COALESCE($18, freight_cost),
         insurance_cost         = COALESCE($19, insurance_cost),
         duty_rate              = COALESCE($20, duty_rate),
@@ -335,8 +335,6 @@ router.put('/:id', protect, async (req, res) => {
         container_returned_date= COALESCE($23, container_returned_date),
         doc_checklist          = COALESCE($24, doc_checklist),
         priority               = COALESCE($25, priority),
-        shipped                = COALESCE($26, shipped),
-        delivered              = COALESCE($27, delivered),
         updated_at             = NOW()
       WHERE id = $17
     `, [supplier_id, container_type, currency, status, marking ?? null,
@@ -350,8 +348,6 @@ router.put('/:id', protect, async (req, res) => {
         container_returned_date ?? null,
         doc_checklist ? JSON.stringify(doc_checklist) : null,
         priority ?? null,
-        shipped !== undefined ? shipped : null,
-        delivered !== undefined ? delivered : null,
         dueDateProvided]);
     if (items) await saveItems(client, req.params.id, items);
     await client.query('COMMIT');

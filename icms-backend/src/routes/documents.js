@@ -52,12 +52,20 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const uploadDirAbs = path.resolve(uploadDir);
+const safeFilePath = (p) => {
+  const resolved = path.resolve(p);
+  if (!resolved.startsWith(uploadDirAbs + path.sep) && resolved !== uploadDirAbs) return null;
+  return resolved;
+};
+
 // GET /api/documents/:id/download
 router.get('/:id/download', protect, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT * FROM documents WHERE id = $1', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Document not found' });
-    const filePath = path.resolve(rows[0].file_path);
+    const filePath = safeFilePath(rows[0].file_path);
+    if (!filePath) return res.status(403).json({ error: 'Access denied' });
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found on disk' });
     res.download(filePath, rows[0].original_name);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -68,8 +76,8 @@ router.delete('/:id', protect, async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM documents WHERE id = $1 RETURNING *', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Document not found' });
-    const filePath = path.resolve(rows[0].file_path);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    const filePath = safeFilePath(rows[0].file_path);
+    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
