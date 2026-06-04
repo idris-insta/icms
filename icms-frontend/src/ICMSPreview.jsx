@@ -477,6 +477,10 @@ const Dashboard = () => {
   );
 };
 
+// ─── ORDER FORM HELPERS (module-level — prevents React unmounting inputs on state change) ────
+const TH = ({ children, w }) => <th style={{ padding: "7px 6px", background: "#1e3a5f", color: "#fff", fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", minWidth: w || 70, border: "1px solid #2d4f7f" }}>{children}</th>;
+const TD = ({ children, style }) => <td style={{ padding: "3px 4px", border: "1px solid #e2e8f0", verticalAlign: "middle", ...style }}>{children}</td>;
+
 // ─── ORDER FORM MODAL ─────────────────────────────────────────────────────────
 const BLANK_ITEM = { _sku_id: "", item_name: "", thickness: "", size: "", liner_color: "", qty_ctn: "", total_ctn: "", total_roll: "", unit_price: "", kg_pkg: "", code: "", shipping_mark: "", cbm: "" };
 const DOC_CHECKLIST_ITEMS = ["Bill of Lading","Commercial Invoice","Packing List","Certificate of Origin","Insurance Certificate","Customs Declaration"];
@@ -527,13 +531,20 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
   const [fetchingPO, setFetchingPO] = useState(false);
 
   const setField = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  // Auto-calc total_roll = total_ctn × qty_ctn when either changes
+  // Auto-calc total_roll = total_ctn × qty_ctn; auto-calc cbm = total_ctn × cbm_per_unit from SKU
   const setItem  = (idx, k, v) => setItems(prev => prev.map((r, i) => {
     if (i !== idx) return r;
     const updated = { ...r, [k]: v };
     if ((k === "total_ctn" || k === "qty_ctn") && updated.qty_ctn && updated.total_ctn) {
       const calc = parseInt(updated.total_ctn) * parseInt(updated.qty_ctn);
       if (!isNaN(calc)) updated.total_roll = String(calc);
+    }
+    if (k === "total_ctn" && updated._sku_id) {
+      const sku = skus.find(s => String(s.id) === String(updated._sku_id));
+      if (sku?.cbm_per_unit) {
+        const cbm = (parseInt(updated.total_ctn) || 0) * parseFloat(sku.cbm_per_unit);
+        if (!isNaN(cbm) && cbm > 0) updated.cbm = cbm.toFixed(3);
+      }
     }
     return updated;
   }));
@@ -550,13 +561,17 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
       .finally(() => setFetchingPO(false));
   }, [form.supplier_id, isEdit]);
 
-  // Auto-fill row from SKU master selection
+  // Auto-fill row from SKU master selection (also sets CBM from cbm_per_unit × total_ctn)
   const selectSku  = (idx, skuId) => {
     setItems(prev => prev.map((r, i) => {
       if (i !== idx) return r;
       if (!skuId) return { ...r, _sku_id: "" };
       const sku = skus.find(s => String(s.id) === String(skuId));
       if (!sku) return { ...r, _sku_id: skuId };
+      const ctn = parseInt(r.total_ctn) || 0;
+      const autoCbm = sku.cbm_per_unit
+        ? (ctn > 0 ? (ctn * parseFloat(sku.cbm_per_unit)).toFixed(3) : String(parseFloat(sku.cbm_per_unit)))
+        : r.cbm;
       return {
         ...r,
         _sku_id:       skuId,
@@ -567,6 +582,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
         kg_pkg:        sku.roll_weight  != null ? String(sku.roll_weight) : r.kg_pkg,
         code:          sku.item_code    || r.code,
         shipping_mark: sku.shipping_marks || r.shipping_mark,
+        cbm:           autoCbm,
       };
     }));
   };
@@ -615,25 +631,6 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
 
   const inp  = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "5px 7px", fontSize: 12, outline: "none", width: "100%", boxSizing: "border-box", background: "#fff" };
   const lbl  = { display: "block", fontSize: 10, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 3 };
-  const TH   = ({ children, w }) => <th style={{ padding: "7px 6px", background: "#1e3a5f", color: "#fff", fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", whiteSpace: "nowrap", minWidth: w || 70, border: "1px solid #2d4f7f" }}>{children}</th>;
-  const TD   = ({ children, style }) => <td style={{ padding: "3px 4px", border: "1px solid #e2e8f0", verticalAlign: "middle", ...style }}>{children}</td>;
-  const CI   = ({ idx, field, type = "text", placeholder = "" }) => (
-    <input type={type} placeholder={placeholder} value={items[idx][field]} onChange={e => setItem(idx, field, e.target.value)}
-      style={{ ...inp, textAlign: type === "number" ? "right" : "left" }} />
-  );
-  // SKU select dropdown — auto-fills the row; text input below for manual override
-  const SkuCell = ({ idx }) => (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <select value={items[idx]._sku_id || ""} onChange={e => selectSku(idx, e.target.value)}
-        style={{ ...inp, fontSize: 11, color: items[idx]._sku_id ? "#0f172a" : "#94a3b8" }}>
-        <option value="">— Select from Master —</option>
-        {skus.map(s => <option key={s.id} value={s.id}>{s.description || s.sku_code}</option>)}
-      </select>
-      <input placeholder="or type item name…" value={items[idx].item_name}
-        onChange={e => setItem(idx, "item_name", e.target.value)}
-        style={{ ...inp, fontSize: 11, color: "#374151" }} />
-    </div>
-  );
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "20px 12px" }}>
@@ -758,30 +755,47 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                     const rowTotal   = (parseInt(row.total_roll) || 0) * (parseFloat(row.unit_price) || 0);
                     const rowTotalKg = (parseInt(row.total_ctn)  || 0) * (parseFloat(row.kg_pkg)    || 0);
                     const isEven = idx % 2 === 0;
+                    // ci() returns JSX directly (not a component) — avoids remount/focus-loss on state changes
+                    const ci = (field, type = "text", ph = "") => (
+                      <input type={type} placeholder={ph} value={row[field]}
+                        onChange={e => setItem(idx, field, e.target.value)}
+                        style={{ ...inp, textAlign: type === "number" ? "right" : "left" }} />
+                    );
                     return (
                       <tr key={idx} style={{ background: isEven ? "#fff" : "#f8fafc" }}>
-                        <TD><SkuCell idx={idx} /></TD>
-                        <TD><CI idx={idx} field="thickness"    placeholder="0.9MM" /></TD>
-                        <TD><CI idx={idx} field="size"         placeholder="1000MM×50M" /></TD>
-                        <TD><CI idx={idx} field="liner_color"  placeholder="YELLOW" /></TD>
-                        <TD><CI idx={idx} field="qty_ctn"      type="number" placeholder="24" /></TD>
-                        <TD><CI idx={idx} field="total_ctn"    type="number" placeholder="0" /></TD>
-                        <TD style={{ background: "#f0fdf4" }}><CI idx={idx} field="total_roll" type="number" placeholder="0" /></TD>
-                        <TD><CI idx={idx} field="unit_price"   type="number" placeholder="0.00" /></TD>
+                        <TD>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            <select value={row._sku_id || ""} onChange={e => selectSku(idx, e.target.value)}
+                              style={{ ...inp, fontSize: 11, color: row._sku_id ? "#0f172a" : "#94a3b8" }}>
+                              <option value="">— Select from Master —</option>
+                              {skus.map(s => <option key={s.id} value={s.id}>{s.description || s.sku_code}</option>)}
+                            </select>
+                            <input placeholder="or type item name…" value={row.item_name}
+                              onChange={e => setItem(idx, "item_name", e.target.value)}
+                              style={{ ...inp, fontSize: 11, color: "#374151" }} />
+                          </div>
+                        </TD>
+                        <TD>{ci("thickness", "text", "0.9MM")}</TD>
+                        <TD>{ci("size", "text", "1000MM×50M")}</TD>
+                        <TD>{ci("liner_color", "text", "YELLOW")}</TD>
+                        <TD>{ci("qty_ctn", "number", "24")}</TD>
+                        <TD>{ci("total_ctn", "number", "0")}</TD>
+                        <TD style={{ background: "#f0fdf4" }}>{ci("total_roll", "number", "0")}</TD>
+                        <TD>{ci("unit_price", "number", "0.00")}</TD>
                         <TD style={{ background: "#fffbeb" }}>
                           <div style={{ padding: "5px 7px", textAlign: "right", fontWeight: 600, color: "#92400e", fontSize: 12 }}>
                             {rowTotal.toLocaleString()}
                           </div>
                         </TD>
-                        <TD><CI idx={idx} field="kg_pkg"       type="number" placeholder="0" /></TD>
+                        <TD>{ci("kg_pkg", "number", "0")}</TD>
                         <TD style={{ background: "#fffbeb" }}>
                           <div style={{ padding: "5px 7px", textAlign: "right", fontWeight: 600, color: "#92400e", fontSize: 12 }}>
                             {rowTotalKg.toLocaleString()}
                           </div>
                         </TD>
-                        <TD><CI idx={idx} field="cbm"          type="number" placeholder="0.00" /></TD>
-                        <TD><CI idx={idx} field="code"         placeholder="IS-57145V-1.0YL" /></TD>
-                        <TD><CI idx={idx} field="shipping_mark" placeholder="INSULATION…" /></TD>
+                        <TD>{ci("cbm", "number", "0.000")}</TD>
+                        <TD>{ci("code", "text", "IS-57145V-1.0YL")}</TD>
+                        <TD>{ci("shipping_mark", "text", "INSULATION…")}</TD>
                         <TD>
                           <button type="button" onClick={() => delRow(idx)} style={{ background: "#fef2f2", border: "none", borderRadius: 4, cursor: "pointer", color: "#dc2626", fontSize: 14, padding: "2px 6px", fontWeight: 700 }}>×</button>
                         </TD>
@@ -1089,7 +1103,7 @@ const ImportOrders = () => {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <div style={{ display: "flex", background: "#f1f5f9", borderRadius: 8, padding: 3, gap: 2 }}>
-            {[["list","📋 List"],["supplier","🏭 By Supplier"]].map(([v, label]) => (
+            {[["list","📋 List"],["grouped","📂 By Supplier"],["supplier","🏭 Stats"]].map(([v, label]) => (
               <button key={v} onClick={() => { setView(v); setSelectedSupplier(null); setSelected(null); }}
                 style={{ padding: "6px 12px", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: view === v ? 600 : 400, background: view === v ? "#fff" : "transparent", color: view === v ? "#1d4ed8" : "#64748b" }}>{label}</button>
             ))}
@@ -1216,8 +1230,8 @@ const ImportOrders = () => {
                             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                               <thead>
                                 <tr style={{ background: "#334155" }}>
-                                  {["ITEM","THICKNESS","SIZE","LINER/COLOR","QTY/CTN","TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","KG/PKG","TOTAL KG","CODE","SHIPPING MARK"].map(h =>
-                                    <th key={h} style={{ padding: "6px 8px", color: "#fff", fontWeight: 600, fontSize: 10, textAlign: h.includes("TOTAL") || h === "PRICE $" || h === "QTY/CTN" ? "right" : "left", whiteSpace: "nowrap", border: "1px solid #4b5563" }}>{h}</th>
+                                  {["ITEM","THICKNESS","SIZE","LINER/COLOR","QTY/CTN","TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","KG/PKG","TOTAL KG","CBM","CODE","SHIPPING MARK"].map(h =>
+                                    <th key={h} style={{ padding: "6px 8px", color: "#fff", fontWeight: 600, fontSize: 10, textAlign: h.includes("TOTAL") || h === "PRICE $" || h === "QTY/CTN" || h === "CBM" ? "right" : "left", whiteSpace: "nowrap", border: "1px solid #4b5563" }}>{h}</th>
                                   )}
                                 </tr>
                               </thead>
@@ -1238,19 +1252,21 @@ const ImportOrders = () => {
                                       <td style={{ padding: "6px 8px", textAlign: "right", fontWeight: 600, color: "#059669" }}>${rowTotal.toLocaleString()}</td>
                                       <td style={{ padding: "6px 8px", textAlign: "right" }}>{item.kg_pkg}</td>
                                       <td style={{ padding: "6px 8px", textAlign: "right", color: "#64748b" }}>{rowTotalKg.toLocaleString()}</td>
+                                      <td style={{ padding: "6px 8px", textAlign: "right", color: "#7c3aed", fontWeight: 600 }}>{parseFloat(item.cbm || 0).toFixed(3)}</td>
                                       <td style={{ padding: "6px 8px", fontSize: 10, color: "#475569" }}>{item.code}</td>
                                       <td style={{ padding: "6px 8px", fontSize: 10, color: "#475569" }}>{item.shipping_mark}</td>
                                     </tr>
                                   );
                                 })}
                                 {(!exp.items || exp.items.length === 0) && (
-                                  <tr><td colSpan={13} style={{ padding: 12, textAlign: "center", color: "#94a3b8" }}>No items recorded for this order</td></tr>
+                                  <tr><td colSpan={14} style={{ padding: 12, textAlign: "center", color: "#94a3b8" }}>No items recorded for this order</td></tr>
                                 )}
                                 {exp.items?.length > 0 && (() => {
                                   const tCtn  = exp.items.reduce((s, i) => s + (parseInt(i.total_ctn)  || 0), 0);
                                   const tRoll = exp.items.reduce((s, i) => s + (parseInt(i.total_roll) || 0), 0);
                                   const tVal  = exp.items.reduce((s, i) => s + (parseInt(i.total_roll) || 0) * (parseFloat(i.unit_price) || 0), 0);
                                   const tKg   = exp.items.reduce((s, i) => s + (parseInt(i.total_ctn)  || 0) * (parseFloat(i.kg_pkg)    || 0), 0);
+                                  const tCbm  = exp.items.reduce((s, i) => s + (parseFloat(i.cbm) || 0), 0);
                                   return (
                                     <tr style={{ background: "#1e3a5f" }}>
                                       <td colSpan={4} style={{ padding: "6px 8px", color: "#fff", fontWeight: 700, fontSize: 11, border: "1px solid #2d4f7f" }}>TOTALS</td>
@@ -1261,6 +1277,7 @@ const ImportOrders = () => {
                                       <td style={{ padding: "6px 8px", textAlign: "right", color: "#34d399", fontWeight: 800, border: "1px solid #2d4f7f" }}>${tVal.toLocaleString()}</td>
                                       <td style={{ border: "1px solid #2d4f7f" }}></td>
                                       <td style={{ padding: "6px 8px", textAlign: "right", color: "#34d399", fontWeight: 800, border: "1px solid #2d4f7f" }}>{tKg.toLocaleString()}</td>
+                                      <td style={{ padding: "6px 8px", textAlign: "right", color: "#c4b5fd", fontWeight: 800, border: "1px solid #2d4f7f" }}>{tCbm.toFixed(3)}</td>
                                       <td colSpan={2} style={{ border: "1px solid #2d4f7f" }}></td>
                                     </tr>
                                   );
@@ -1272,6 +1289,133 @@ const ImportOrders = () => {
                       </div>
                     );
                   })
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── GROUPED BY SUPPLIER VIEW ── */}
+      {view === "grouped" && !loading && (() => {
+        const grouped = orders.reduce((acc, o) => {
+          const key = o.supplier || "Unknown";
+          if (!acc[key]) acc[key] = { supplier: key, supplier_id: o.supplier_id, orders: [] };
+          acc[key].orders.push(o);
+          return acc;
+        }, {});
+        const groups = Object.values(grouped).sort((a, b) => a.supplier.localeCompare(b.supplier));
+        return (
+          <div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search PO, supplier…" style={{ flex: 1, minWidth: 180, padding: "9px 12px", border: "1px solid #e2e8f0", borderRadius: 8, fontSize: 13, outline: "none" }} />
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {statusFilters.slice(0, 5).map(s => (
+                  <button key={s} onClick={() => setFilter(s)} style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid " + (filter === s ? "#3b82f6" : "#e2e8f0"), background: filter === s ? "#3b82f6" : "#fff", color: filter === s ? "#fff" : "#374151", cursor: "pointer", fontSize: 12, fontWeight: filter === s ? 600 : 400 }}>{s}</button>
+                ))}
+              </div>
+            </div>
+            {groups.map(group => {
+              const grpVal   = group.orders.reduce((s, o) => s + (parseFloat(o.total_value) || 0), 0);
+              const grpCbm   = group.orders.reduce((s, o) => s + (parseFloat(o.total_cbm)  || 0), 0);
+              const grpRolls = group.orders.reduce((s, o) => s + (parseInt(o.total_quantity) || 0), 0);
+              return (
+                <div key={group.supplier} style={{ marginBottom: 20 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", background: "linear-gradient(90deg,#1e3a5f,#2d5a8e)", borderRadius: "10px 10px 0 0" }}>
+                    <span style={{ color: "#fff", fontWeight: 800, fontSize: 14 }}>🏭 {group.supplier}</span>
+                    <span style={{ background: "rgba(255,255,255,0.15)", color: "#e2e8f0", padding: "2px 10px", borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{group.orders.length} orders</span>
+                    <span style={{ color: "#34d399", fontWeight: 700, fontSize: 13, marginLeft: "auto" }}>{fmtUSD(grpVal)}</span>
+                    <span style={{ color: "#93c5fd", fontSize: 11 }}>{grpCbm.toFixed(2)} CBM</span>
+                    <span style={{ color: "#fbbf24", fontSize: 11 }}>{grpRolls.toLocaleString()} rolls</span>
+                    <button onClick={() => { setShowForm(true); setEditOrder(null); }}
+                      style={{ padding: "3px 10px", background: "#3b82f6", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 11, color: "#fff", fontWeight: 600 }}>+ New</button>
+                  </div>
+                  <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderTop: "none", borderRadius: "0 0 10px 10px", overflow: "hidden" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "#f8fafc" }}>
+                          {["PO Number","Marking","Status","Value","Total CBM","Total Rolls","BL No","ETD","ETA","Payment Due",""].map(h => (
+                            <th key={h} style={{ padding: "8px 12px", textAlign: "left", fontWeight: 600, color: "#374151", fontSize: 10, textTransform: "uppercase", borderBottom: "1px solid #e2e8f0" }}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.orders.map((o, oi) => {
+                          const overdue = o.payment_due_date && new Date(o.payment_due_date) < new Date();
+                          const dueSoon = o.payment_due_date && !overdue && (new Date(o.payment_due_date) - new Date()) < 7 * 86400000;
+                          return (
+                            <tr key={o.id} onClick={() => selectOrder(o)}
+                              style={{ borderBottom: oi < group.orders.length - 1 ? "1px solid #f1f5f9" : "none", cursor: "pointer", background: selected?.id === o.id ? "#eff6ff" : "transparent" }}
+                              onMouseEnter={e => { if (selected?.id !== o.id) e.currentTarget.style.background = "#f8fafc"; }}
+                              onMouseLeave={e => { e.currentTarget.style.background = selected?.id === o.id ? "#eff6ff" : "transparent"; }}>
+                              <td style={{ padding: "8px 12px", fontWeight: 700, color: "#3b82f6" }}>{o.po_number}</td>
+                              <td style={{ padding: "8px 12px", color: "#64748b", fontSize: 11 }}>{o.marking || "—"}</td>
+                              <td style={{ padding: "8px 12px" }}><Badge status={o.status} /></td>
+                              <td style={{ padding: "8px 12px", fontWeight: 700, color: "#059669" }}>{fmtUSD(o.total_value)}</td>
+                              <td style={{ padding: "8px 12px", color: "#374151" }}>{parseFloat(o.total_cbm || 0).toFixed(2)}</td>
+                              <td style={{ padding: "8px 12px", color: "#374151" }}>{(o.total_quantity || 0).toLocaleString()}</td>
+                              <td style={{ padding: "8px 12px", fontFamily: "monospace", fontSize: 11, color: o.bl_number ? "#1d4ed8" : "#cbd5e1" }}>{o.bl_number || "—"}</td>
+                              <td style={{ padding: "8px 12px", color: "#64748b", fontSize: 11 }}>{o.etd ? o.etd.split("T")[0] : "—"}</td>
+                              <td style={{ padding: "8px 12px", color: "#64748b", fontSize: 11 }}>{o.eta ? o.eta.split("T")[0] : "—"}</td>
+                              <td style={{ padding: "8px 12px", fontSize: 11, fontWeight: overdue || dueSoon ? 700 : 400, color: overdue ? "#dc2626" : dueSoon ? "#d97706" : "#64748b" }}>
+                                {o.payment_due_date ? <>{overdue ? "⚠️ " : dueSoon ? "⏰ " : ""}{o.payment_due_date.split("T")[0]}</> : "—"}
+                              </td>
+                              <td style={{ padding: "8px 12px" }}>
+                                <div style={{ display: "flex", gap: 4 }}>
+                                  <button onClick={e => { e.stopPropagation(); openEdit(o); }} style={{ padding: "3px 7px", background: "#f1f5f9", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11 }}>Edit</button>
+                                  <button onClick={e => { e.stopPropagation(); handleDelete(o.id); }} style={{ padding: "3px 7px", background: "#fef2f2", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#dc2626" }}>Del</button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+            {groups.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "#94a3b8" }}>No orders found</div>}
+            {selected && (
+              <div style={{ marginTop: 16, background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", padding: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14 }}>📦 {selected.po_number} — {selected.supplier}</span>
+                  <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b" }}>×</button>
+                </div>
+                {(selected.items || []).length > 0 && (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                      <thead><tr style={{ background: "#334155" }}>
+                        {["ITEM","THICKNESS","SIZE","LINER/COLOR","QTY/CTN","TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","KG/PKG","TOTAL KG","CBM","CODE","SHIPPING MARK"].map(h =>
+                          <th key={h} style={{ padding: "6px 8px", color: "#fff", fontWeight: 600, fontSize: 10, textAlign: "left", whiteSpace: "nowrap", border: "1px solid #4b5563" }}>{h}</th>
+                        )}
+                      </tr></thead>
+                      <tbody>
+                        {selected.items.map((item, ii) => {
+                          const rt = (parseInt(item.total_roll) || 0) * (parseFloat(item.unit_price) || 0);
+                          const rk = (parseInt(item.total_ctn) || 0) * (parseFloat(item.kg_pkg) || 0);
+                          return (
+                            <tr key={ii} style={{ background: ii % 2 === 0 ? "#fff" : "#f8fafc" }}>
+                              <td style={{ padding: "5px 8px", fontWeight: 500 }}>{item.item_name}</td>
+                              <td style={{ padding: "5px 8px" }}>{item.thickness}</td>
+                              <td style={{ padding: "5px 8px" }}>{item.size}</td>
+                              <td style={{ padding: "5px 8px" }}>{item.liner_color}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right" }}>{item.qty_ctn}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 600 }}>{item.total_ctn}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 600, color: "#1d4ed8" }}>{item.total_roll}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right" }}>${parseFloat(item.unit_price || 0).toFixed(2)}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 600, color: "#059669" }}>${rt.toLocaleString()}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right" }}>{item.kg_pkg}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right", color: "#64748b" }}>{rk.toLocaleString()}</td>
+                              <td style={{ padding: "5px 8px", textAlign: "right", color: "#7c3aed", fontWeight: 600 }}>{parseFloat(item.cbm || 0).toFixed(3)}</td>
+                              <td style={{ padding: "5px 8px", fontSize: 10 }}>{item.code}</td>
+                              <td style={{ padding: "5px 8px", fontSize: 10 }}>{item.shipping_mark}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </div>
             )}
@@ -1475,8 +1619,8 @@ const ImportOrders = () => {
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
                       <thead>
                         <tr style={{ background: "#1e3a5f" }}>
-                          {["ITEM","THICKNESS","SIZE","LINER/COLOR","QTY/CTN","TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","KG/PKG","TOTAL KG","CODE","SHIPPING MARK"].map(h =>
-                            <th key={h} style={{ padding: "7px 8px", color: "#fff", fontWeight: 700, fontSize: 10, textAlign: ["TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","QTY/CTN","KG/PKG","TOTAL KG"].includes(h) ? "right" : "left", whiteSpace: "nowrap", border: "1px solid #2d4f7f" }}>{h}</th>
+                          {["ITEM","THICKNESS","SIZE","LINER/COLOR","QTY/CTN","TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","KG/PKG","TOTAL KG","CBM","CODE","SHIPPING MARK"].map(h =>
+                            <th key={h} style={{ padding: "7px 8px", color: "#fff", fontWeight: 700, fontSize: 10, textAlign: ["TOTAL CTN","TOTAL ROLL","PRICE $","TOTAL $","QTY/CTN","KG/PKG","TOTAL KG","CBM"].includes(h) ? "right" : "left", whiteSpace: "nowrap", border: "1px solid #2d4f7f" }}>{h}</th>
                           )}
                         </tr>
                       </thead>
@@ -1497,6 +1641,7 @@ const ImportOrders = () => {
                               <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 700, color: "#059669" }}>${rt.toLocaleString()}</td>
                               <td style={{ padding: "7px 8px", textAlign: "right" }}>{item.kg_pkg}</td>
                               <td style={{ padding: "7px 8px", textAlign: "right", color: "#64748b" }}>{rkg.toLocaleString()}</td>
+                              <td style={{ padding: "7px 8px", textAlign: "right", color: "#7c3aed", fontWeight: 600 }}>{parseFloat(item.cbm || 0).toFixed(3)}</td>
                               <td style={{ padding: "7px 8px", fontSize: 10, color: "#475569" }}>{item.code}</td>
                               <td style={{ padding: "7px 8px", fontSize: 10, color: "#475569" }}>{item.shipping_mark}</td>
                             </tr>
@@ -1507,6 +1652,7 @@ const ImportOrders = () => {
                           const tRoll = selected.items.reduce((s, i) => s + (parseInt(i.total_roll) || 0), 0);
                           const tVal  = selected.items.reduce((s, i) => s + (parseInt(i.total_roll) || 0) * (parseFloat(i.unit_price) || 0), 0);
                           const tKg   = selected.items.reduce((s, i) => s + (parseInt(i.total_ctn)  || 0) * (parseFloat(i.kg_pkg)    || 0), 0);
+                          const tCbm  = selected.items.reduce((s, i) => s + (parseFloat(i.cbm) || 0), 0);
                           return (
                             <tr style={{ background: "#1e3a5f" }}>
                               <td colSpan={4} style={{ padding: "7px 8px", color: "#fff", fontWeight: 700, border: "1px solid #2d4f7f" }}>TOTALS</td>
@@ -1517,6 +1663,7 @@ const ImportOrders = () => {
                               <td style={{ padding: "7px 8px", textAlign: "right", color: "#34d399", fontWeight: 800, border: "1px solid #2d4f7f" }}>${tVal.toLocaleString()}</td>
                               <td style={{ border: "1px solid #2d4f7f" }}></td>
                               <td style={{ padding: "7px 8px", textAlign: "right", color: "#34d399", fontWeight: 800, border: "1px solid #2d4f7f" }}>{tKg.toLocaleString()}</td>
+                              <td style={{ padding: "7px 8px", textAlign: "right", color: "#c4b5fd", fontWeight: 800, border: "1px solid #2d4f7f" }}>{tCbm.toFixed(3)}</td>
                               <td colSpan={2} style={{ border: "1px solid #2d4f7f" }}></td>
                             </tr>
                           );
