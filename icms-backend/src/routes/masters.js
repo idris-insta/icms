@@ -1,53 +1,67 @@
-const router  = require('express').Router();
-const multer  = require('multer');
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const multer    = require('multer');
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 // ── CSV helpers ───────────────────────────────────────────────────────────────
 
+// Handles quoted fields including "" escaped quotes inside quoted values
 function parseCSV(buf) {
   const text = buf.toString('utf8');
   const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(l => l.trim());
   if (lines.length < 2) return { headers: [], rows: [] };
+
   const splitLine = (line) => {
-    const cols = []; let cur = '', inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      if (line[i] === '"') { inQ = !inQ; }
-      else if (line[i] === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
-      else { cur += line[i]; }
+    const cols = [];
+    let cur = '', inQ = false, i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (inQ) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i += 2; continue; } // escaped quote
+          inQ = false;
+        } else {
+          cur += ch;
+        }
+      } else {
+        if (ch === '"')      { inQ = true; }
+        else if (ch === ',') { cols.push(cur.trim()); cur = ''; }
+        else                 { cur += ch; }
+      }
+      i++;
     }
     cols.push(cur.trim());
     return cols;
   };
-  const headers = splitLine(lines[0]).map(h => h.replace(/^"|"$/g, '').trim());
+
+  const headers = splitLine(lines[0]);
   const rows = lines.slice(1).map(l => {
-    const vals = splitLine(l).map(v => v.replace(/^"|"$/g, '').trim());
+    const vals = splitLine(l);
     return Object.fromEntries(headers.map((h, i) => [h, vals[i] ?? '']));
   }).filter(r => Object.values(r).some(v => v !== ''));
   return { headers, rows };
 }
 
-const SKU_HEADERS     = 'sku_code,description,hsn_code,category,thickness,size,color,liner_color,roll_weight,item_code,shipping_marks,weight_per_unit,cbm_per_unit';
+const SKU_HEADERS      = 'sku_code,description,hsn_code,category,thickness,size,color,liner_color,roll_weight,item_code,shipping_marks,weight_per_unit,cbm_per_unit';
 const SUPPLIER_HEADERS = 'code,name,country,base_currency,contact_email,contact_phone,payment_terms_days';
-const PORT_HEADERS    = 'code,name,country,port_type';
+const PORT_HEADERS     = 'code,name,country,port_type';
 
 const SKU_EXAMPLE      = 'ADH-001,55 Mic Clear Adhesive Tape,39199090,Tape,55 MIC,480MM X 100M,CLEAR,CLEAR,4.2,ADH-001-480X100,CLEAR ADHESIVE TAPE ROLLS,0.5,0.002';
 const SUPPLIER_EXAMPLE = 'SUP-001,Acme Packaging Ltd,China,CNY,contact@acme.cn,+86-21-12345678,30';
 const PORT_EXAMPLE     = 'CNSHA,Shanghai,China,origin';
 
-// ── SKUs ─────────────────────────────────────────────────────────────────────
+// ── SKUs ──────────────────────────────────────────────────────────────────────
 
-// GET /masters/skus/template
 router.get('/skus/template', protect, (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="skus_template.csv"');
   res.send(SKU_HEADERS + '\n' + SKU_EXAMPLE + '\n');
 });
 
-// POST /masters/skus/bulk
-router.post('/skus/bulk', protect, uploadMem.single('file'), async (req, res) => {
+router.post('/skus/bulk', protect, authorize('owner', 'manager'), uploadMem.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
@@ -83,13 +97,21 @@ router.post('/skus/bulk', protect, uploadMem.single('file'), async (req, res) =>
 });
 
 router.get('/skus', protect, async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
+  const offset = (page - 1) * limit;
   try {
-    const { rows } = await db.query('SELECT * FROM skus ORDER BY sku_code');
-    res.json({ skus: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM skus');
+    const total = parseInt(countRows[0].count);
+    const { rows } = await db.query('SELECT * FROM skus ORDER BY sku_code LIMIT $1 OFFSET $2', [limit, offset]);
+    res.json({ skus: rows, total, page, limit, pages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error('[masters/skus GET]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.post('/skus', protect, async (req, res) => {
+router.post('/skus', protect, authorize('owner', 'manager'), async (req, res) => {
   const { sku_code, description, hsn_code, weight_per_unit, cbm_per_unit, category,
           thickness, size, color, liner_color, roll_weight, item_code, shipping_marks } = req.body;
   if (!sku_code) return res.status(400).json({ error: 'sku_code required' });
@@ -104,11 +126,12 @@ router.post('/skus', protect, async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'SKU code already exists' });
-    res.status(500).json({ error: err.message });
+    console.error('[masters/skus POST]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-router.put('/skus/:id', protect, async (req, res) => {
+router.put('/skus/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   const { description, hsn_code, weight_per_unit, cbm_per_unit, category,
           thickness, size, color, liner_color, roll_weight, item_code, shipping_marks } = req.body;
   try {
@@ -133,28 +156,32 @@ router.put('/skus/:id', protect, async (req, res) => {
         req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'SKU not found' });
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/skus PUT]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.delete('/skus/:id', protect, async (req, res) => {
+router.delete('/skus/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM skus WHERE id = $1 RETURNING id', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'SKU not found' });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/skus DELETE]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // ── Suppliers ─────────────────────────────────────────────────────────────────
 
-// GET /masters/suppliers/template
 router.get('/suppliers/template', protect, (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="suppliers_template.csv"');
   res.send(SUPPLIER_HEADERS + '\n' + SUPPLIER_EXAMPLE + '\n');
 });
 
-// POST /masters/suppliers/bulk
-router.post('/suppliers/bulk', protect, uploadMem.single('file'), async (req, res) => {
+router.post('/suppliers/bulk', protect, authorize('owner', 'manager'), uploadMem.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
@@ -182,13 +209,21 @@ router.post('/suppliers/bulk', protect, uploadMem.single('file'), async (req, re
 });
 
 router.get('/suppliers', protect, async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
+  const offset = (page - 1) * limit;
   try {
-    const { rows } = await db.query('SELECT * FROM suppliers ORDER BY name');
-    res.json({ suppliers: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM suppliers');
+    const total = parseInt(countRows[0].count);
+    const { rows } = await db.query('SELECT * FROM suppliers ORDER BY name LIMIT $1 OFFSET $2', [limit, offset]);
+    res.json({ suppliers: rows, total, page, limit, pages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error('[masters/suppliers GET]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.post('/suppliers', protect, async (req, res) => {
+router.post('/suppliers', protect, authorize('owner', 'manager'), async (req, res) => {
   const { code, name, country, base_currency, contact_email, contact_phone, payment_terms_days } = req.body;
   if (!code || !name) return res.status(400).json({ error: 'code and name required' });
   try {
@@ -199,11 +234,12 @@ router.post('/suppliers', protect, async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Supplier code already exists' });
-    res.status(500).json({ error: err.message });
+    console.error('[masters/suppliers POST]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-router.put('/suppliers/:id', protect, async (req, res) => {
+router.put('/suppliers/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   const { name, country, base_currency, contact_email, contact_phone, payment_terms_days, is_active,
           port, avg_value_usd, ex_rate, duty_percent, expense_inr, target_per_month } = req.body;
   try {
@@ -229,32 +265,35 @@ router.put('/suppliers/:id', protect, async (req, res) => {
         expense_inr ?? null, target_per_month ?? null, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Supplier not found' });
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/suppliers PUT]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.delete('/suppliers/:id', protect, async (req, res) => {
+router.delete('/suppliers/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
-    // soft delete
     const { rows } = await db.query(
       'UPDATE suppliers SET is_active = false WHERE id = $1 RETURNING id',
       [req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Supplier not found' });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/suppliers DELETE]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// ── Ports ────────────────────────────────────────────────────────────────────
+// ── Ports ─────────────────────────────────────────────────────────────────────
 
-// GET /masters/ports/template
 router.get('/ports/template', protect, (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="ports_template.csv"');
   res.send(PORT_HEADERS + '\n' + PORT_EXAMPLE + '\n');
 });
 
-// POST /masters/ports/bulk
-router.post('/ports/bulk', protect, uploadMem.single('file'), async (req, res) => {
+router.post('/ports/bulk', protect, authorize('owner', 'manager'), uploadMem.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
@@ -277,13 +316,21 @@ router.post('/ports/bulk', protect, uploadMem.single('file'), async (req, res) =
 });
 
 router.get('/ports', protect, async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit) || 100));
+  const offset = (page - 1) * limit;
   try {
-    const { rows } = await db.query('SELECT * FROM ports ORDER BY name');
-    res.json({ ports: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM ports');
+    const total = parseInt(countRows[0].count);
+    const { rows } = await db.query('SELECT * FROM ports ORDER BY name LIMIT $1 OFFSET $2', [limit, offset]);
+    res.json({ ports: rows, total, page, limit, pages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error('[masters/ports GET]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.post('/ports', protect, async (req, res) => {
+router.post('/ports', protect, authorize('owner', 'manager'), async (req, res) => {
   const { code, name, country, port_type } = req.body;
   if (!code || !name) return res.status(400).json({ error: 'code and name required' });
   try {
@@ -294,11 +341,12 @@ router.post('/ports', protect, async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Port code already exists' });
-    res.status(500).json({ error: err.message });
+    console.error('[masters/ports POST]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-router.put('/ports/:id', protect, async (req, res) => {
+router.put('/ports/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   const { name, country, port_type } = req.body;
   try {
     const { rows } = await db.query(`
@@ -310,15 +358,21 @@ router.put('/ports/:id', protect, async (req, res) => {
     `, [name || null, country || null, port_type || null, req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Port not found' });
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/ports PUT]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-router.delete('/ports/:id', protect, async (req, res) => {
+router.delete('/ports/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM ports WHERE id = $1 RETURNING id', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Port not found' });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[masters/ports DELETE]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;

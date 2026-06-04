@@ -1,21 +1,48 @@
-const router  = require('express').Router();
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const multer    = require('multer');
+const path      = require('path');
+const fs        = require('fs');
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 const uploadDir = process.env.UPLOAD_DIR || './uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+const ALLOWED_MIME = new Set([
+  'application/pdf',
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain', 'text/csv',
+]);
+
+const ALLOWED_EXT = new Set([
+  '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp',
+  '.doc', '.docx', '.xls', '.xlsx', '.txt', '.csv',
+]);
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename:    (req, file, cb) => {
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    cb(null, unique + path.extname(file.originalname));
+    cb(null, unique + path.extname(file.originalname).toLowerCase());
   },
 });
-const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20 MB
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_MIME.has(file.mimetype) || !ALLOWED_EXT.has(ext)) {
+      return cb(new Error('File type not allowed'));
+    }
+    cb(null, true);
+  },
+});
 
 // GET /api/documents?order_id=
 router.get('/', protect, async (req, res) => {
@@ -31,11 +58,24 @@ router.get('/', protect, async (req, res) => {
     q += ' ORDER BY d.created_at DESC';
     const { rows } = await db.query(q, params);
     res.json({ documents: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[documents/list]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// POST /api/documents/upload
-router.post('/upload', protect, upload.single('file'), async (req, res) => {
+// POST /api/documents/upload — any authenticated user may upload
+router.post('/upload', protect, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { order_id, doc_type } = req.body;
   if (!order_id) return res.status(400).json({ error: 'order_id required' });
@@ -49,7 +89,10 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
       SELECT d.*, o.po_number FROM documents d JOIN import_orders o ON d.order_id = o.id WHERE d.id = $1
     `, [rows[0].id]);
     res.status(201).json(doc[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[documents/upload]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 const uploadDirAbs = path.resolve(uploadDir);
@@ -68,18 +111,24 @@ router.get('/:id/download', protect, async (req, res) => {
     if (!filePath) return res.status(403).json({ error: 'Access denied' });
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found on disk' });
     res.download(filePath, rows[0].original_name);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[documents/download]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// DELETE /api/documents/:id
-router.delete('/:id', protect, async (req, res) => {
+// DELETE /api/documents/:id — owner or manager only
+router.delete('/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM documents WHERE id = $1 RETURNING *', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Document not found' });
     const filePath = safeFilePath(rows[0].file_path);
     if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[documents/delete]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;

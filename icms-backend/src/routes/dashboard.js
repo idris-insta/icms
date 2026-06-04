@@ -54,7 +54,8 @@ router.get('/stats', protect, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/stats]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -123,7 +124,8 @@ router.get('/financial', protect, async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/financial]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -171,7 +173,8 @@ router.get('/logistics', protect, async (req, res) => {
       demurrage_alerts: demurrageRows.rows,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/logistics]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

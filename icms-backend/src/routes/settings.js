@@ -10,7 +10,10 @@ router.get('/', protect, async (req, res) => {
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
     res.json({ settings });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[settings/get]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // PUT /api/settings — body: { key: value, ... }
@@ -28,7 +31,10 @@ router.put('/', protect, authorize('owner'), async (req, res) => {
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
     res.json({ settings });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[settings/put]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;

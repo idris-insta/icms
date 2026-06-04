@@ -28,13 +28,15 @@ app.use('/api/reports',   require('./routes/reports'));
 app.use('/api/settings',  require('./routes/settings'));
 
 // ── Health check (also tests DB) ──────────────────────────────────────────────
-app.get('/api/health', async (req, res) => {
+const protect = require('./middleware/auth');
+app.get('/api/health', protect, async (req, res) => {
   const db = require('./db');
   try {
     await db.query('SELECT 1');
     res.json({ status: 'ok', db: 'connected', ts: new Date() });
   } catch (err) {
-    res.status(503).json({ status: 'degraded', db: 'disconnected', error: err.message, ts: new Date() });
+    console.error('[health]', err);
+    res.status(503).json({ status: 'degraded', db: 'disconnected', ts: new Date() });
   }
 });
 

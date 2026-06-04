@@ -32,7 +32,10 @@ router.get('/supplier-summary', protect, async (req, res) => {
       ORDER BY s.name
     `);
     res.json({ data: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[reports/supplier-summary]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/reports/containers
@@ -52,7 +55,10 @@ router.get('/containers', protect, async (req, res) => {
       ORDER BY o.container_type
     `);
     res.json({ data: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[reports/containers]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/reports/tracking
@@ -67,7 +73,10 @@ router.get('/tracking', protect, async (req, res) => {
       ORDER BY o.eta ASC NULLS LAST
     `);
     res.json({ data: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[reports/tracking]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/reports/variance
@@ -86,7 +95,10 @@ router.get('/variance', protect, async (req, res) => {
       LIMIT 20
     `);
     res.json({ data: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[reports/variance]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;

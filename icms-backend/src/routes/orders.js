@@ -1,6 +1,7 @@
-const router  = require('express').Router();
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 const ORDER_SELECT = `
   SELECT o.id, o.po_number, o.container_type, o.currency, o.status, o.priority,
@@ -21,11 +22,11 @@ const ORDER_SELECT = `
   JOIN suppliers s ON o.supplier_id = s.id
 `;
 
-// Upsert line items — deletes existing then re-inserts
+// Upsert line items — deletes existing then re-inserts inside a transaction
 async function saveItems(client, orderId, items) {
   await client.query('DELETE FROM order_items WHERE order_id = $1', [orderId]);
   for (const item of items) {
-    const total_kg  = (parseFloat(item.total_ctn)  || 0) * (parseFloat(item.kg_pkg) || 0);
+    const total_kg = (parseFloat(item.total_ctn) || 0) * (parseFloat(item.kg_pkg) || 0);
     await client.query(`
       INSERT INTO order_items
         (order_id, item_name, thickness, size, liner_color,
@@ -38,16 +39,16 @@ async function saveItems(client, orderId, items) {
       item.thickness     || '',
       item.size          || '',
       item.liner_color   || '',
-      parseInt(item.qty_ctn)     || 0,
-      parseInt(item.total_ctn)   || 0,
-      parseInt(item.total_roll)  || 0,
+      parseInt(item.qty_ctn)      || 0,
+      parseInt(item.total_ctn)    || 0,
+      parseInt(item.total_roll)   || 0,
       parseFloat(item.unit_price) || 0,
       total_kg,
-      parseFloat(item.kg_pkg)    || 0,
+      parseFloat(item.kg_pkg)     || 0,
       item.code          || '',
       item.shipping_mark || '',
-      parseInt(item.total_roll)  || 0,   // quantity = total_roll
-      parseFloat(item.cbm)       || 0,
+      parseInt(item.total_roll)   || 0,
+      parseFloat(item.cbm)        || 0,
     ]);
   }
 }
@@ -55,24 +56,42 @@ async function saveItems(client, orderId, items) {
 // Recalculate order totals from items
 function calcTotals(items) {
   return {
-    total_quantity: items.reduce((s, i) => s + (parseInt(i.total_roll) || 0), 0),
-    total_weight:   items.reduce((s, i) => s + (parseInt(i.total_ctn) || 0) * (parseFloat(i.kg_pkg) || 0), 0),
-    total_value:    items.reduce((s, i) => s + (parseInt(i.total_roll) || 0) * (parseFloat(i.unit_price) || 0), 0),
-    total_cbm:      items.reduce((s, i) => s + (parseFloat(i.cbm) || 0), 0),
+    total_quantity: items.reduce((s, i) => s + (parseInt(i.total_roll)  || 0), 0),
+    total_weight:   items.reduce((s, i) => s + (parseInt(i.total_ctn)   || 0) * (parseFloat(i.kg_pkg)     || 0), 0),
+    total_value:    items.reduce((s, i) => s + (parseInt(i.total_roll)  || 0) * (parseFloat(i.unit_price) || 0), 0),
+    total_cbm:      items.reduce((s, i) => s + (parseFloat(i.cbm)       || 0), 0),
   };
 }
 
-// GET /api/orders
+// GET /api/orders — supports ?status=, ?search=, ?page=, ?limit=
 router.get('/', protect, async (req, res) => {
   const { status, search } = req.query;
+  const page  = Math.max(1, parseInt(req.query.page)  || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+  const offset = (page - 1) * limit;
   try {
     let where = [], params = [];
     if (status && status !== 'All') { params.push(status); where.push(`o.status = $${params.length}`); }
     if (search) { params.push(`%${search}%`); where.push(`(o.po_number ILIKE $${params.length} OR s.name ILIKE $${params.length})`); }
     const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
-    const { rows } = await db.query(`${ORDER_SELECT} ${clause} ORDER BY o.created_at DESC`, params);
-    res.json({ orders: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+
+    const countParams = [...params];
+    const { rows: countRows } = await db.query(
+      `SELECT COUNT(*) FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id ${clause}`,
+      countParams
+    );
+    const total = parseInt(countRows[0].count);
+
+    params.push(limit, offset);
+    const { rows } = await db.query(
+      `${ORDER_SELECT} ${clause} ORDER BY o.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+    res.json({ orders: rows, total, page, limit, pages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error('[orders/list]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/orders/kanban
@@ -88,17 +107,19 @@ router.get('/kanban', protect, async (req, res) => {
       groups[r.status].push({ id: r.id, po_number: r.po_number, supplier: r.supplier, container: r.container_type, value: parseFloat(r.total_value) });
     });
     res.json(groups);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/kanban]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/orders/supplier-summary  — MUST be before /:id to avoid route shadowing
 router.get('/supplier-summary', protect, async (req, res) => {
   try {
-    // Compute week date boundaries for current month
-    const now  = new Date();
-    const yr   = now.getFullYear();
-    const mo   = now.getMonth(); // 0-indexed
-    const pad  = (d) => `${yr}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const now     = new Date();
+    const yr      = now.getFullYear();
+    const mo      = now.getMonth();
+    const pad     = (d) => `${yr}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     const lastDay = new Date(yr, mo + 1, 0).getDate();
     const w1s = pad(1),  w1e = pad(7);
     const w2s = pad(8),  w2e = pad(14);
@@ -116,18 +137,15 @@ router.get('/supplier-summary', protect, async (req, res) => {
         COALESCE(s.expense_inr,    0)::float      AS expense_inr,
         COALESCE(s.target_per_month, 1)::float    AS target_per_month,
         COUNT(o.id)::int                          AS total_orders,
-        -- status-based counts
         COUNT(o.id) FILTER (WHERE o.status = 'Delivered')::int                                                                              AS delivered_count,
         COUNT(o.id) FILTER (WHERE o.status NOT IN ('Draft','Tentative','Confirmed'))::int                                                   AS shipped_count,
         COUNT(o.id) FILTER (WHERE o.status IN ('Draft','Tentative','Confirmed'))::int                                                       AS pending_count,
         COUNT(o.id) FILTER (WHERE o.status IN ('Loaded','Shipped','In Transit','Arrived','Customs Clearance','Cleared'))::int               AS otw_count,
-        -- week counts (ETD within each week of current month)
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $1::date AND $2::date)::int  AS week1,
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $3::date AND $4::date)::int  AS week2,
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $5::date AND $6::date)::int  AS week3,
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $7::date AND $8::date)::int  AS week4,
         COUNT(o.id) FILTER (WHERE o.etd::date BETWEEN $9::date AND $10::date)::int AS month_total,
-        -- financial totals
         COALESCE(SUM(o.total_value), 0)           AS total_value,
         p_agg.paid                                AS total_paid
       FROM suppliers s
@@ -146,17 +164,19 @@ router.get('/supplier-summary', protect, async (req, res) => {
       const ex   = parseFloat(r.ex_rate)       || 84;
       const duty = parseFloat(r.duty_percent)  || 10;
       const exp  = parseFloat(r.expense_inr)   || 0;
-      // CP (₹ per USD of goods) = (avg × ex × (1 + duty/100) + expense_inr) / avg
       const cp_inr = avg > 0 ? ((avg * ex * (1 + duty / 100)) + exp) / avg : 0;
       const outstanding = parseFloat(r.total_value) - parseFloat(r.total_paid);
       return { ...r, cp_inr: Math.round(cp_inr * 100) / 100, outstanding };
     });
 
     res.json({ suppliers: result });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/supplier-summary]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// GET /api/orders/next-po-number?supplier_id=5  — auto-generate next PO number
+// GET /api/orders/next-po-number?supplier_id=5
 router.get('/next-po-number', protect, async (req, res) => {
   const { supplier_id } = req.query;
   if (!supplier_id) return res.status(400).json({ error: 'supplier_id required' });
@@ -164,35 +184,24 @@ router.get('/next-po-number', protect, async (req, res) => {
     const { rows: supRows } = await db.query('SELECT code FROM suppliers WHERE id = $1', [parseInt(supplier_id)]);
     if (!supRows[0]) return res.status(404).json({ error: 'Supplier not found' });
     const code = supRows[0].code;
-    const yr   = String(new Date().getFullYear()).slice(-2); // "25"
+    const yr   = String(new Date().getFullYear()).slice(-2);
 
-    // Find highest 3-digit sequence for this supplier (format: "ISDS 00125")
-    const { rows } = await db.query(
-      `SELECT po_number FROM import_orders WHERE supplier_id = $1 ORDER BY created_at DESC`,
-      [parseInt(supplier_id)]
-    );
+    const { rows } = await db.query(`
+      SELECT COALESCE(MAX(
+        CASE WHEN po_number ~ '^.+ [0-9]{3}[0-9]{2}$'
+        THEN CAST(substring(po_number FROM '.+ ([0-9]{3})[0-9]{2}$') AS INT)
+        ELSE 0 END
+      ), 0) AS max_seq
+      FROM import_orders WHERE supplier_id = $1
+    `, [parseInt(supplier_id)]);
 
-    let maxSeq = 0;
-    for (const row of rows) {
-      // Pattern: ISCODE [NNN][YY]  — last 2 chars = year, before that = 3-digit seq
-      const m = row.po_number.match(/\s(\d{3})\d{2}$/);
-      if (m) {
-        maxSeq = Math.max(maxSeq, parseInt(m[1]));
-      } else {
-        // Fallback: extract number from last token
-        const parts = row.po_number.trim().split(/\s+/);
-        const last  = parts[parts.length - 1] || '';
-        if (last.length >= 3) {
-          const num = parseInt(last.slice(0, last.length - 2));
-          if (!isNaN(num)) maxSeq = Math.max(maxSeq, num);
-        }
-      }
-    }
-
+    const maxSeq = parseInt(rows[0].max_seq) || 0;
     const seq    = String(maxSeq + 1).padStart(3, '0');
-    const next_po = `${code} ${seq}${yr}`;
-    res.json({ next_po, supplier_code: code });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ next_po: `${code} ${seq}${yr}`, supplier_code: code });
+  } catch (err) {
+    console.error('[orders/next-po-number]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/orders/:id  (includes items)
@@ -205,11 +214,14 @@ router.get('/:id', protect, async (req, res) => {
       [req.params.id]
     );
     res.json({ ...rows[0], items });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/get]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// POST /api/orders/:id/tracking — add a tracking update
-router.post('/:id/tracking', protect, async (req, res) => {
+// POST /api/orders/:id/tracking — add a tracking update (staff+)
+router.post('/:id/tracking', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { location, event, note } = req.body;
   if (!event) return res.status(400).json({ error: 'event required' });
   try {
@@ -223,23 +235,24 @@ router.post('/:id/tracking', protect, async (req, res) => {
     `, [JSON.stringify([entry]), req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
     res.json({ tracking_updates: rows[0].tracking_updates });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/tracking]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// POST /api/orders — create with optional items[]
-router.post('/', protect, async (req, res) => {
+// POST /api/orders — create (staff+)
+router.post('/', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { po_number, supplier_id, container_type, currency, status, marking,
           total_quantity, total_weight, total_cbm, total_value,
           utilization_percentage, eta, etd, bl_number, shipment_date,
           payment_due_date, notes, items = [],
           freight_cost, insurance_cost, duty_rate, free_days, demurrage_rate,
-          container_returned_date, doc_checklist, priority,
-          shipped, delivered } = req.body;
+          container_returned_date, doc_checklist, priority } = req.body;
   if (!po_number || !supplier_id) return res.status(400).json({ error: 'po_number and supplier_id required' });
 
   const totals = items.length ? calcTotals(items) : { total_quantity, total_weight, total_cbm, total_value };
 
-  // Auto-calc payment_due_date from shipment_date + supplier terms if not provided
   let dueDateVal = payment_due_date || null;
   if (!dueDateVal && shipment_date) {
     const { rows: sup } = await db.query('SELECT payment_terms_days FROM suppliers WHERE id = $1', [supplier_id]);
@@ -275,23 +288,22 @@ router.post('/', protect, async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.code === '23505') return res.status(409).json({ error: 'PO number already exists' });
-    res.status(500).json({ error: err.message });
+    console.error('[orders/create]', err);
+    res.status(500).json({ error: 'Internal server error' });
   } finally { client.release(); }
 });
 
-// PUT /api/orders/:id — update with optional items[]
-router.put('/:id', protect, async (req, res) => {
+// PUT /api/orders/:id — update (staff+)
+router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { supplier_id, container_type, currency, status, marking,
           total_quantity, total_weight, total_cbm, total_value,
           utilization_percentage, eta, etd, bl_number, shipment_date,
           payment_due_date, notes, items,
           freight_cost, insurance_cost, duty_rate, free_days, demurrage_rate,
-          container_returned_date, doc_checklist, priority,
-          shipped, delivered } = req.body;
+          container_returned_date, doc_checklist, priority } = req.body;
 
   const totals = (items && items.length) ? calcTotals(items) : { total_quantity, total_weight, total_cbm, total_value };
 
-  // Auto-calc due date if shipment_date provided and no explicit due date
   const dueDateProvided = payment_due_date !== undefined;
   let dueDateVal = dueDateProvided ? (payment_due_date || null) : undefined;
   if (dueDateVal === undefined && shipment_date) {
@@ -357,12 +369,13 @@ router.put('/:id', protect, async (req, res) => {
     res.json({ ...rows[0], items: savedItems });
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    console.error('[orders/update]', err);
+    res.status(500).json({ error: 'Internal server error' });
   } finally { client.release(); }
 });
 
-// PATCH /api/orders/:id/status
-router.patch('/:id/status', protect, async (req, res) => {
+// PATCH /api/orders/:id/status — staff+
+router.patch('/:id/status', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { status } = req.body;
   const VALID = ['Draft','Tentative','Confirmed','Loaded','Shipped','In Transit','Arrived','Customs Clearance','Cleared','Delivered'];
   if (!VALID.includes(status)) return res.status(400).json({ error: 'Invalid status' });
@@ -373,16 +386,22 @@ router.patch('/:id/status', protect, async (req, res) => {
     );
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/status]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-// DELETE /api/orders/:id
-router.delete('/:id', protect, async (req, res) => {
+// DELETE /api/orders/:id — owner or manager only
+router.delete('/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM import_orders WHERE id = $1 RETURNING id', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[orders/delete]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;
