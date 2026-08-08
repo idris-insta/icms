@@ -1,6 +1,7 @@
-const router  = require('express').Router();
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 // GET /api/settings
 router.get('/', protect, async (req, res) => {
@@ -9,11 +10,14 @@ router.get('/', protect, async (req, res) => {
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
     res.json({ settings });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[settings/get]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // PUT /api/settings — body: { key: value, ... }
-router.put('/', protect, async (req, res) => {
+router.put('/', protect, authorize('owner'), async (req, res) => {
   const entries = Object.entries(req.body);
   if (!entries.length) return res.status(400).json({ error: 'No settings provided' });
   try {
@@ -27,7 +31,10 @@ router.put('/', protect, async (req, res) => {
     const settings = {};
     rows.forEach(r => { settings[r.key] = r.value; });
     res.json({ settings });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[settings/put]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 module.exports = router;

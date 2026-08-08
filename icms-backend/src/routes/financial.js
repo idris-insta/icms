@@ -1,6 +1,7 @@
-const router  = require('express').Router();
-const db      = require('../db');
-const protect = require('../middleware/auth');
+const router    = require('express').Router();
+const db        = require('../db');
+const protect   = require('../middleware/auth');
+const authorize = require('../middleware/authorize');
 
 // GET /api/financial/payments — payments made + payments due
 router.get('/payments', protect, async (req, res) => {
@@ -16,26 +17,29 @@ router.get('/payments', protect, async (req, res) => {
       `),
       db.query(`
         SELECT o.id, o.po_number, s.name AS supplier,
-               o.total_value - COALESCE(SUM(p.amount), 0) AS balance,
-               (o.created_at::date + s.payment_terms_days)       AS due_date,
-               (o.created_at::date + s.payment_terms_days) < CURRENT_DATE AS is_overdue
+               o.total_value - COALESCE(p.paid, 0) AS balance,
+               o.payment_due_date                   AS due_date,
+               o.payment_due_date < CURRENT_DATE    AS is_overdue
         FROM import_orders o
         JOIN suppliers s ON o.supplier_id = s.id
-        LEFT JOIN payments p ON p.order_id = o.id
+        LEFT JOIN (
+          SELECT order_id, SUM(amount) AS paid FROM payments GROUP BY order_id
+        ) p ON o.id = p.order_id
         WHERE o.status NOT IN ('Delivered')
-        GROUP BY o.id, o.po_number, s.name, o.total_value, o.created_at, s.payment_terms_days
-        HAVING o.total_value - COALESCE(SUM(p.amount), 0) > 0
+          AND o.payment_due_date IS NOT NULL
+          AND o.total_value - COALESCE(p.paid, 0) > 0
         ORDER BY due_date ASC
       `),
     ]);
     res.json({ payments_made: made.rows, payments_due: due.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[financial/payments]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/financial/payments — record a payment
-router.post('/payments', protect, async (req, res) => {
+// POST /api/financial/payments — record a payment (owner, manager, staff)
+router.post('/payments', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { reference, order_id, supplier_id, amount, currency, payment_date, payment_type, notes } = req.body;
   if (!reference || !order_id || !supplier_id || !amount) {
     return res.status(400).json({ error: 'reference, order_id, supplier_id, amount required' });
@@ -48,7 +52,8 @@ router.post('/payments', protect, async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Payment reference already exists' });
-    res.status(500).json({ error: err.message });
+    console.error('[financial/payments POST]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -57,19 +62,25 @@ router.get('/supplier-accounts', protect, async (req, res) => {
   try {
     const { rows } = await db.query(`
       SELECT s.id, s.name, s.code, s.base_currency, s.payment_terms_days,
-             COUNT(DISTINCT o.id)::int                           AS order_count,
-             COALESCE(SUM(DISTINCT o.total_value), 0)           AS total_invoiced,
-             COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.supplier_id = s.id), 0) AS total_paid
+             COUNT(DISTINCT o.id)::int                AS order_count,
+             COALESCE(SUM(o.total_value), 0)          AS total_invoiced,
+             COALESCE(p_agg.total_paid, 0)            AS total_paid
       FROM suppliers s
       LEFT JOIN import_orders o ON o.supplier_id = s.id
-      GROUP BY s.id, s.name, s.code, s.base_currency, s.payment_terms_days
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
+      ) p_agg ON true
+      GROUP BY s.id, s.name, s.code, s.base_currency, s.payment_terms_days, p_agg.total_paid
       ORDER BY total_invoiced DESC NULLS LAST
     `);
     res.json({ accounts: rows.map(r => ({
       ...r,
       outstanding: parseFloat(r.total_invoiced) - parseFloat(r.total_paid),
     }))});
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[financial/supplier-accounts]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/financial/ledger/:supplier_id — per-supplier ledger
@@ -101,7 +112,10 @@ router.get('/ledger/:supplier_id', protect, async (req, res) => {
       return { ...e, balance };
     });
     res.json({ ledger });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[financial/ledger]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/financial/due-alerts — payments due soon or overdue
@@ -110,7 +124,7 @@ router.get('/due-alerts', protect, async (req, res) => {
     const { rows } = await db.query(`
       SELECT o.id, o.po_number, o.payment_due_date, o.bl_number,
              s.name AS supplier,
-             o.total_value - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) AS balance,
+             o.total_value - COALESCE(p.paid, 0) AS balance,
              CASE
                WHEN o.payment_due_date < CURRENT_DATE THEN 'overdue'
                WHEN o.payment_due_date <= CURRENT_DATE + 7 THEN 'due_soon'
@@ -119,23 +133,30 @@ router.get('/due-alerts', protect, async (req, res) => {
              (o.payment_due_date - CURRENT_DATE) AS days_remaining
       FROM import_orders o
       JOIN suppliers s ON o.supplier_id = s.id
+      LEFT JOIN (
+        SELECT order_id, SUM(amount) AS paid FROM payments GROUP BY order_id
+      ) p ON o.id = p.order_id
       WHERE o.payment_due_date IS NOT NULL
         AND o.status NOT IN ('Delivered')
-        AND o.total_value - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id), 0) > 0
+        AND o.total_value - COALESCE(p.paid, 0) > 0
       ORDER BY o.payment_due_date ASC
     `);
     res.json({ alerts: rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[financial/due-alerts]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // DELETE /api/financial/payments/:id
-router.delete('/payments/:id', protect, async (req, res) => {
+router.delete('/payments/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   try {
     const { rows } = await db.query('DELETE FROM payments WHERE id = $1 RETURNING id', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Payment not found' });
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[financial/payments DELETE]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

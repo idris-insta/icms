@@ -1,0 +1,41 @@
+/* ICMS app-level styles (focus, dark mode, motion). Imported by main.jsx. */
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; }
+
+/* Visible keyboard focus ring (keyboard only — mouse clicks stay clean) */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role="switch"]:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #2563eb !important;
+  outline-offset: 2px !important;
+  border-radius: 4px;
+}
+
+button, [role="button"], [role="switch"], a, select, summary { touch-action: manipulation; }
+button:disabled, [aria-disabled="true"] { cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Dark mode — smart invert (works over inline-styled components) */
+html.dark-invert { filter: invert(0.92) hue-rotate(180deg); background: #0e1014; }
+html.dark-invert img,
+html.dark-invert svg,
+html.dark-invert canvas,
+html.dark-invert video,
+html.dark-invert [data-no-invert] { filter: invert(1) hue-rotate(180deg); }
+
+@media (max-width: 760px) {
+  table { font-size: 12px; }
+}

@@ -54,7 +54,8 @@ router.get('/stats', protect, async (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/stats]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -83,15 +84,20 @@ router.get('/financial', protect, async (req, res) => {
       `),
       db.query(`
         SELECT s.name AS supplier_name, s.base_currency AS currency,
-          COUNT(o.id)                                   AS total_orders,
-          SUM(o.total_value)                            AS total_value,
-          COALESCE(SUM(p.amount), 0)                    AS total_paid,
-          SUM(o.total_value) - COALESCE(SUM(p.amount), 0) AS balance
+          COALESCE(o_agg.total_orders, 0)::int          AS total_orders,
+          COALESCE(o_agg.total_value,  0)               AS total_value,
+          COALESCE(p_agg.total_paid,   0)               AS total_paid,
+          COALESCE(o_agg.total_value,  0) - COALESCE(p_agg.total_paid, 0) AS balance
         FROM suppliers s
-        JOIN import_orders o ON o.supplier_id = s.id
-        LEFT JOIN payments p ON p.supplier_id = s.id
-        GROUP BY s.id, s.name, s.base_currency
-        HAVING SUM(o.total_value) - COALESCE(SUM(p.amount), 0) > 0
+        LEFT JOIN LATERAL (
+          SELECT COUNT(id) AS total_orders, COALESCE(SUM(total_value), 0) AS total_value
+          FROM import_orders WHERE supplier_id = s.id
+        ) o_agg ON true
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
+        ) p_agg ON true
+        WHERE s.is_active = true
+          AND COALESCE(o_agg.total_value, 0) - COALESCE(p_agg.total_paid, 0) > 0
         ORDER BY balance DESC
       `),
     ]);
@@ -118,7 +124,8 @@ router.get('/financial', protect, async (req, res) => {
       })),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/financial]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -166,7 +173,8 @@ router.get('/logistics', protect, async (req, res) => {
       demurrage_alerts: demurrageRows.rows,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[dashboard/logistics]', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
