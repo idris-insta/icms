@@ -2,6 +2,56 @@ const router  = require('express').Router();
 const db      = require('../db');
 const protect = require('../middleware/auth');
 
+// GET /api/dashboard/insights — status funnel, monthly volume, lead-time KPIs, exceptions
+router.get('/insights', protect, async (req, res) => {
+  try {
+    const [funnel, monthly, lead, exDocs, exStale, exPay, exDem] = await Promise.all([
+      db.query(`SELECT status, COUNT(*)::int AS n, COALESCE(SUM(total_value),0)::float AS value
+                FROM import_orders GROUP BY status`),
+      db.query(`SELECT to_char(date_trunc('month', COALESCE(etd, created_at)),'YYYY-MM') AS month,
+                  COUNT(*)::int AS orders, COALESCE(SUM(total_value),0)::float AS value
+                FROM import_orders WHERE COALESCE(etd, created_at) >= CURRENT_DATE - INTERVAL '12 months'
+                GROUP BY 1 ORDER BY 1`),
+      db.query(`SELECT AVG(delivered_date - etd) FILTER (WHERE delivered_date IS NOT NULL AND etd IS NOT NULL)::float AS avg_lead,
+                  COUNT(*) FILTER (WHERE delivered_date IS NOT NULL AND eta IS NOT NULL)::int AS measurable,
+                  COUNT(*) FILTER (WHERE delivered_date IS NOT NULL AND eta IS NOT NULL AND delivered_date <= eta)::int AS on_time
+                FROM import_orders`),
+      db.query(`SELECT o.id, o.po_number, s.name AS supplier FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
+                WHERE o.status IN ('Shipped','In Transit','Arrived','Customs Clearance','Cleared')
+                  AND (o.doc_checklist IS NULL OR NOT (o.doc_checklist ? 'Bill of Lading')
+                       OR (o.doc_checklist->>'Bill of Lading')='false') LIMIT 50`),
+      db.query(`SELECT o.id, o.po_number, s.name AS supplier, o.status,
+                  (CURRENT_DATE - COALESCE(o.status_changed_at, o.updated_at)::date) AS days
+                FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
+                WHERE o.status NOT IN ('Delivered','Paid','Draft')
+                  AND COALESCE(o.status_changed_at, o.updated_at) < CURRENT_DATE - INTERVAL '14 days'
+                ORDER BY 5 DESC LIMIT 50`),
+      db.query(`SELECT o.id, o.po_number, s.name AS supplier, o.payment_due_date,
+                  (o.total_value - COALESCE((SELECT SUM(amount) FROM payments p WHERE p.order_id=o.id),0))::float AS outstanding
+                FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
+                WHERE o.payment_due_date IS NOT NULL AND o.payment_due_date < CURRENT_DATE
+                  AND (o.total_value - COALESCE((SELECT SUM(amount) FROM payments p WHERE p.order_id=o.id),0)) > 0.5 LIMIT 50`),
+      db.query(`SELECT o.id, o.po_number, s.name AS supplier, o.eta, COALESCE(o.free_days,7) AS free_days
+                FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
+                WHERE o.status IN ('Arrived','Customs Clearance','Cleared') AND o.eta IS NOT NULL
+                  AND (o.eta + (COALESCE(o.free_days,7) || ' days')::interval) <= CURRENT_DATE + INTERVAL '5 days' LIMIT 50`),
+    ]);
+    const lt = lead.rows[0] || {};
+    res.json({
+      funnel: funnel.rows,
+      monthly: monthly.rows,
+      kpi: {
+        avg_lead_days: lt.avg_lead != null ? Math.round(lt.avg_lead) : null,
+        on_time_pct: lt.measurable > 0 ? Math.round(lt.on_time / lt.measurable * 1000) / 10 : null,
+      },
+      exceptions: {
+        missing_docs: exDocs.rows, stale: exStale.rows,
+        overdue_payments: exPay.rows, demurrage_risk: exDem.rows,
+      },
+    });
+  } catch (err) { console.error('[dashboard/insights]', err); res.status(500).json({ error: 'Internal server error' }); }
+});
+
 // GET /api/dashboard/stats
 router.get('/stats', protect, async (req, res) => {
   try {

@@ -110,6 +110,7 @@ router.post('/', protect, authorize('owner', 'manager', 'staff'), async (req, re
 // PUT /api/schedules/:id
 router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const b = req.body;
+  const nz = (v) => (v === '' || v === undefined || v === null) ? null : v; // empty → NULL for date/int cols
   try {
     const { rows } = await db.query(`
       UPDATE order_schedules SET
@@ -127,10 +128,10 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
         updated_at       = NOW()
       WHERE id = $12 RETURNING *
     `, [b.item_name ?? null, b.container_type ?? null, b.currency ?? null,
-        b.qty_per_shipment ?? null, b.frequency ?? null,
-        b.frequency ? intervalDays(b.frequency, b.interval_days) : (b.interval_days ?? null),
-        b.total_shipments ?? null, b.start_date ?? null, b.status ?? null, b.notes ?? null,
-        b.sku_id ?? null, req.params.id]);
+        nz(b.qty_per_shipment), b.frequency ?? null,
+        b.frequency ? intervalDays(b.frequency, b.interval_days) : nz(b.interval_days),
+        nz(b.total_shipments), nz(b.start_date), b.status ?? null, b.notes ?? null,
+        nz(b.sku_id), req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Schedule not found' });
     res.json(rows[0]);
   } catch (err) {

@@ -318,6 +318,7 @@ router.post('/suppliers', protect, authorize('owner', 'manager'), async (req, re
 router.put('/suppliers/:id', protect, authorize('owner', 'manager'), async (req, res) => {
   const { name, country, base_currency, contact_email, contact_phone, payment_terms_days, is_active,
           port, city, avg_value_usd, ex_rate, duty_percent, expense_inr, target_per_month } = req.body;
+  const nz = (v) => (v === '' || v === undefined || v === null) ? null : v; // empty → NULL for numeric cols
   try {
     const { rows } = await db.query(`
       UPDATE suppliers SET
@@ -337,9 +338,9 @@ router.put('/suppliers/:id', protect, authorize('owner', 'manager'), async (req,
         city               = COALESCE($15, city),
         updated_at         = NOW()
       WHERE id = $14 RETURNING *
-    `, [name, country, base_currency, contact_email, contact_phone, payment_terms_days, is_active,
-        port ?? null, avg_value_usd ?? null, ex_rate ?? null, duty_percent ?? null,
-        expense_inr ?? null, target_per_month ?? null, req.params.id, city ?? null]);
+    `, [name, country, base_currency, contact_email, contact_phone, nz(payment_terms_days), is_active,
+        port ?? null, nz(avg_value_usd), nz(ex_rate), nz(duty_percent),
+        nz(expense_inr), nz(target_per_month), req.params.id, city ?? null]);
     if (!rows[0]) return res.status(404).json({ error: 'Supplier not found' });
     res.json(rows[0]);
   } catch (err) {

@@ -1,9 +1,57 @@
 const router    = require('express').Router();
+const https     = require('https');
 const db        = require('../db');
 const protect   = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 
 // All costing figures are USD-based. INR conversion uses the supplier ex_rate.
+
+// Fetch the live USD→INR rate (cached 1h to avoid hammering upstream)
+let _fxCache = null;
+async function fetchLiveRate() {
+  if (_fxCache && Date.now() - _fxCache.fetchedAt < 3600_000) return _fxCache;
+  const data = await new Promise((resolve, reject) => {
+    https.get('https://open.er-api.com/v6/latest/USD', r => {
+      let b = ''; r.on('data', c => b += c);
+      r.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+    }).on('error', reject);
+  });
+  const rate = data && data.rates && data.rates.INR;
+  if (!rate) throw new Error('Live rate unavailable');
+  _fxCache = { rate: round4(rate), date: data.time_last_update_utc || null, fetchedAt: Date.now() };
+  return _fxCache;
+}
+
+// GET /api/costing/fx-rate — live USD→INR (no API key required)
+router.get('/fx-rate', protect, async (req, res) => {
+  try {
+    const cached = !!(_fxCache && Date.now() - _fxCache.fetchedAt < 3600_000);
+    const fx = await fetchLiveRate();
+    res.json({ rate: fx.rate, date: fx.date, source: 'open.er-api.com', cached });
+  } catch (err) {
+    console.error('[fx-rate]', err.message);
+    res.status(502).json({ error: 'Failed to fetch live rate' });
+  }
+});
+
+// GET /api/costing/fx-drift — live rate vs your CIF-weighted average booking rate
+router.get('/fx-drift', protect, async (req, res) => {
+  try {
+    let live = null;
+    try { live = (await fetchLiveRate()).rate; } catch (_) {}
+    const { rows } = await db.query(`
+      SELECT SUM((total_value + COALESCE(freight_cost,0) + COALESCE(insurance_cost,0)) * COALESCE(usd_rate,0)) AS w,
+             SUM(CASE WHEN usd_rate > 0 THEN (total_value + COALESCE(freight_cost,0) + COALESCE(insurance_cost,0)) ELSE 0 END) AS base
+      FROM import_orders
+    `);
+    const avg = rows[0].base > 0 ? rows[0].w / rows[0].base : null;
+    const drift_pct = (live && avg) ? round2((live - avg) / avg * 100) : null;
+    res.json({ live, avg_booking_rate: avg ? round4(avg) : null, drift_pct });
+  } catch (err) {
+    console.error('[costing/fx-drift]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // GET /api/costing/containers — per-container (per-order) landed cost breakdown
 // Filters: ?supplier_id=, ?status=
@@ -25,7 +73,10 @@ router.get('/containers', protect, async (req, res) => {
              COALESCE(o.insurance_cost, 0)::float  AS insurance_cost,
              COALESCE(o.duty_rate, 0)::float       AS duty_rate,
              COALESCE(o.cha_charges, 0)::float     AS cha_charges,
-             COALESCE(o.extra_charges, 0)::float   AS extra_charges
+             COALESCE(o.extra_charges, 0)::float   AS extra_charges,
+             o.usd_rate_delivery::float            AS usd_rate_delivery,
+             (SELECT p.usd_rate FROM payments p WHERE p.order_id = o.id AND p.usd_rate IS NOT NULL
+              ORDER BY p.payment_date DESC, p.id DESC LIMIT 1)::float AS usd_rate_payment
       FROM import_orders o
       JOIN suppliers s ON o.supplier_id = s.id
       ${clause}
@@ -40,8 +91,13 @@ router.get('/containers', protect, async (req, res) => {
       const cif_inr  = cif_usd * r.usd_rate;
       const duty_inr = cif_inr * (r.duty_rate / 100);
       const landed_inr = cif_inr + duty_inr + r.cha_charges + r.extra_charges;
+      // FX impact = (rate at payment − rate at delivery) × CIF USD.
+      // Positive = rupee weakened after delivery, so you paid more INR than at delivery.
+      const rateDel = r.usd_rate_delivery || r.usd_rate;
+      const fx = (r.usd_rate_payment && rateDel) ? (r.usd_rate_payment - rateDel) * cif_usd : null;
       return {
         ...r,
+        fx_impact_inr:     fx === null ? null : round2(fx),
         cif_usd:           round2(cif_usd),
         cif_inr:           round2(cif_inr),
         duty_amount_inr:   round2(duty_inr),
@@ -85,46 +141,83 @@ router.patch('/containers/:id', protect, authorize('owner', 'manager', 'staff'),
   }
 });
 
-// GET /api/costing/suppliers — supplier-wise cost aggregates (USD base) + CP ₹
+// GET /api/costing/suppliers — supplier-wise landed cost (INR), same formula as
+// container-wise. The blended rate is the CIF-USD-weighted mean of each order's rate
+// (dollar cost averaging), so larger shipments pull it toward their booking rate.
+// CHA/extra are per-container values summed across that supplier's containers.
 router.get('/suppliers', protect, async (req, res) => {
   try {
     const { rows } = await db.query(`
+      WITH per_order AS (
+        SELECT o.supplier_id, o.total_quantity,
+               o.total_weight::float AS total_weight, o.total_cbm::float AS total_cbm,
+               o.total_value::float AS goods_value,
+               COALESCE(o.freight_cost,0)::float   AS freight_cost,
+               COALESCE(o.insurance_cost,0)::float AS insurance_cost,
+               COALESCE(o.cha_charges,0)::float    AS cha_charges,
+               COALESCE(o.extra_charges,0)::float  AS extra_charges,
+               COALESCE(o.duty_rate,0)::float      AS duty_rate,
+               COALESCE(o.usd_rate, s.ex_rate, 84)::float AS usd_rate,
+               (o.total_value + COALESCE(o.freight_cost,0) + COALESCE(o.insurance_cost,0))::float AS cif_usd
+        FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id
+      )
       SELECT s.id, s.code, s.name, s.base_currency,
-             COALESCE(s.ex_rate, 84)::float       AS ex_rate,
-             COALESCE(s.duty_percent, 10)::float  AS duty_percent,
-             COALESCE(s.expense_inr, 0)::float    AS expense_inr,
-             COALESCE(s.avg_value_usd, 0)::float  AS avg_value_usd,
-             COUNT(o.id)::int                     AS containers,
-             COALESCE(SUM(o.total_value), 0)::float    AS goods_value,
-             COALESCE(SUM(o.freight_cost), 0)::float   AS freight_cost,
-             COALESCE(SUM(o.insurance_cost), 0)::float AS insurance_cost,
-             COALESCE(SUM(o.total_value * COALESCE(o.duty_rate,0) / 100), 0)::float AS duty_amount,
-             COALESCE(SUM(o.total_quantity), 0)::int   AS total_rolls,
-             COALESCE(SUM(o.total_weight), 0)::float   AS total_kg,
-             COALESCE(SUM(o.total_cbm), 0)::float      AS total_cbm
+             COALESCE(s.ex_rate, 84)::float AS ex_rate,
+             COALESCE(s.duty_percent, 10)::float AS duty_percent,
+             COUNT(po.supplier_id)::int                        AS containers,
+             COALESCE(SUM(po.goods_value),0)::float            AS goods_value,
+             COALESCE(SUM(po.freight_cost),0)::float           AS freight_cost,
+             COALESCE(SUM(po.insurance_cost),0)::float         AS insurance_cost,
+             COALESCE(SUM(po.cha_charges),0)::float            AS cha_charges,
+             COALESCE(SUM(po.extra_charges),0)::float          AS extra_charges,
+             COALESCE(SUM(po.cif_usd),0)::float                AS cif_usd,
+             COALESCE(SUM(po.cif_usd * po.usd_rate),0)::float  AS cif_inr,
+             COALESCE(SUM(po.cif_usd * po.usd_rate * po.duty_rate / 100),0)::float AS duty_amount_inr,
+             COALESCE(SUM(po.total_quantity),0)::int           AS total_rolls,
+             COALESCE(SUM(po.total_weight),0)::float           AS total_kg,
+             COALESCE(SUM(po.total_cbm),0)::float              AS total_cbm
       FROM suppliers s
-      LEFT JOIN import_orders o ON o.supplier_id = s.id
+      LEFT JOIN per_order po ON po.supplier_id = s.id
       WHERE s.is_active = true
-      GROUP BY s.id, s.code, s.name, s.base_currency, s.ex_rate, s.duty_percent, s.expense_inr, s.avg_value_usd
+      GROUP BY s.id, s.code, s.name, s.base_currency, s.ex_rate, s.duty_percent
       ORDER BY goods_value DESC
     `);
     const suppliers = rows.map(r => {
-      const landed_usd = r.goods_value + r.freight_cost + r.insurance_cost + r.duty_amount;
-      const cp_inr = r.avg_value_usd > 0
-        ? ((r.avg_value_usd * r.ex_rate * (1 + r.duty_percent / 100)) + r.expense_inr) / r.avg_value_usd
-        : 0;
+      const avg_usd_rate = r.cif_usd > 0 ? r.cif_inr / r.cif_usd : r.ex_rate;
+      const landed_inr = r.cif_inr + r.duty_amount_inr + r.cha_charges + r.extra_charges;
       return {
         ...r,
-        landed_cost_usd:        round2(landed_usd),
-        avg_landed_per_container: r.containers > 0 ? round2(landed_usd / r.containers) : 0,
-        cost_per_roll_usd:      r.total_rolls > 0 ? round4(landed_usd / r.total_rolls) : 0,
-        cost_per_kg_usd:        r.total_kg    > 0 ? round4(landed_usd / r.total_kg)    : 0,
-        cp_inr:                 round2(cp_inr),
+        avg_usd_rate:             round4(avg_usd_rate),
+        landed_cost_inr:          round2(landed_inr),
+        avg_landed_per_container: r.containers > 0 ? round2(landed_inr / r.containers) : 0,
+        landed_per_roll_inr:      r.total_rolls > 0 ? round2(landed_inr / r.total_rolls) : 0,
+        landed_per_kg_inr:        r.total_kg    > 0 ? round2(landed_inr / r.total_kg)    : 0,
+        cp_factor:                r.goods_value > 0 ? round4(landed_inr / r.goods_value) : 0,
       };
     });
     res.json({ suppliers });
   } catch (err) {
     console.error('[costing/suppliers]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/costing/suppliers/:id — edit a supplier's default USD rate / duty (staff+)
+router.patch('/suppliers/:id', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
+  const b = req.body;
+  const nnum = (v) => { if (v === '' || v === undefined || v === null) return null; const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+  try {
+    const { rows } = await db.query(`
+      UPDATE suppliers SET
+        ex_rate      = COALESCE($1, ex_rate),
+        duty_percent = COALESCE($2, duty_percent),
+        updated_at   = NOW()
+      WHERE id = $3 RETURNING id, ex_rate, duty_percent
+    `, [nnum(b.ex_rate), nnum(b.duty_percent), req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Supplier not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[costing/suppliers PATCH]', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -140,11 +233,13 @@ router.get('/items', protect, async (req, res) => {
     if (supplier_id) { params.push(parseInt(supplier_id)); supFilter = `AND o.supplier_id = $${params.length}`; }
     const { rows } = await db.query(`
       WITH order_costs AS (
-        SELECT id,
-               total_value::float AS order_value,
-               (COALESCE(freight_cost,0) + COALESCE(insurance_cost,0)
-                + total_value * COALESCE(duty_rate,0) / 100)::float AS overhead
-        FROM import_orders
+        SELECT o.id,
+               o.total_value::float AS order_value,
+               ((o.total_value + COALESCE(o.freight_cost,0) + COALESCE(o.insurance_cost,0))
+                 * COALESCE(o.usd_rate, s.ex_rate, 84)
+                 * (1 + COALESCE(o.duty_rate,0)/100)
+                 + COALESCE(o.cha_charges,0) + COALESCE(o.extra_charges,0))::float AS landed_inr
+        FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id
       )
       SELECT oi.item_name, oi.thickness, oi.size, oi.code,
              s.code AS supplier_code, s.name AS supplier,
@@ -158,9 +253,9 @@ router.get('/items', protect, async (req, res) => {
              (array_agg(o.created_at  ORDER BY o.created_at DESC))[1]        AS last_order_date,
              SUM(
                CASE WHEN oc.order_value > 0
-               THEN (oi.total_roll * oi.unit_price) / oc.order_value * oc.overhead
+               THEN (oi.total_roll * oi.unit_price) / oc.order_value * oc.landed_inr
                ELSE 0 END
-             )::float AS allocated_overhead
+             )::float AS landed_inr
       FROM order_items oi
       JOIN import_orders o ON oi.order_id = o.id
       JOIN order_costs  oc ON oc.id = o.id
@@ -169,16 +264,12 @@ router.get('/items', protect, async (req, res) => {
       GROUP BY oi.item_name, oi.thickness, oi.size, oi.code, s.code, s.name
       ORDER BY goods_value DESC
     `, params);
-    const items = rows.map(r => {
-      const avg_price  = r.total_rolls > 0 ? r.goods_value / r.total_rolls : 0;
-      const landed     = r.goods_value + r.allocated_overhead;
-      return {
-        ...r,
-        avg_price:            round4(avg_price),
-        landed_value_usd:     round2(landed),
-        landed_per_roll_usd:  r.total_rolls > 0 ? round4(landed / r.total_rolls) : 0,
-      };
-    });
+    const items = rows.map(r => ({
+      ...r,
+      avg_price:           r.total_rolls > 0 ? round4(r.goods_value / r.total_rolls) : 0,
+      landed_value_inr:    round2(r.landed_inr),
+      landed_per_roll_inr: r.total_rolls > 0 ? round2(r.landed_inr / r.total_rolls) : 0,
+    }));
     res.json({ items });
   } catch (err) {
     console.error('[costing/items]', err);
@@ -197,13 +288,19 @@ router.get('/price-list', protect, async (req, res) => {
     const { rows } = await db.query(`
       SELECT DISTINCT ON (o.supplier_id, oi.item_name, oi.thickness, oi.size)
              s.id AS supplier_id, s.code AS supplier_code, s.name AS supplier,
-             COALESCE(s.ex_rate, 84)::float      AS ex_rate,
-             COALESCE(s.duty_percent, 10)::float AS duty_percent,
-             oi.item_name, oi.thickness, oi.size, oi.liner_color, oi.code,
-             oi.unit_price::float  AS unit_price_usd,
-             oi.kg_pkg::float      AS kg_pkg,
-             o.po_number           AS last_po,
-             o.created_at          AS last_order_date
+             COALESCE(o.usd_rate, s.ex_rate, 84)::float       AS usd_rate,
+             COALESCE(o.duty_rate, s.duty_percent, 10)::float AS duty_percent,
+             o.total_value::float AS order_goods,
+             ((o.total_value + COALESCE(o.freight_cost,0) + COALESCE(o.insurance_cost,0))
+               * COALESCE(o.usd_rate, s.ex_rate, 84))::float  AS order_cif_inr,
+             COALESCE(o.cha_charges,0)::float   AS cha,
+             COALESCE(o.extra_charges,0)::float AS extra,
+             oi.item_name, oi.brand, oi.thickness, oi.size, oi.liner_color, oi.code,
+             oi.unit_price::float    AS unit_price_usd,
+             oi.price_per_sqm::float AS price_per_sqm,
+             oi.kg_pkg::float        AS kg_pkg,
+             o.po_number             AS last_po,
+             o.created_at            AS last_order_date
       FROM order_items oi
       JOIN import_orders o ON oi.order_id = o.id
       JOIN suppliers s     ON o.supplier_id = s.id
@@ -211,9 +308,18 @@ router.get('/price-list', protect, async (req, res) => {
       ORDER BY o.supplier_id, oi.item_name, oi.thickness, oi.size, o.created_at DESC
     `, params);
     const price_list = rows.map(r => {
-      // landed INR per roll = price × ex_rate × (1 + duty%) — supplier expense is per-container, shown separately
-      const landed_inr_per_roll = r.unit_price_usd * r.ex_rate * (1 + r.duty_percent / 100);
-      return { ...r, landed_inr_per_roll: round2(landed_inr_per_roll) };
+      // Full landed, same method as container-wise: the roll inherits its latest order's
+      // landed uplift per $ of goods, so freight/insurance/duty/CHA/extra are all included.
+      const order_landed = r.order_cif_inr * (1 + r.duty_percent / 100) + r.cha + r.extra;
+      const cp_ratio = r.order_goods > 0
+        ? order_landed / r.order_goods
+        : r.usd_rate * (1 + r.duty_percent / 100);
+      return {
+        ...r,
+        usd_rate: round4(r.usd_rate),
+        landed_inr_per_roll: round2(r.unit_price_usd * cp_ratio),
+        landed_inr_per_sqm:  r.price_per_sqm > 0 ? round2(r.price_per_sqm * cp_ratio) : 0,
+      };
     });
     res.json({ price_list });
   } catch (err) {

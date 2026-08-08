@@ -1,7 +1,11 @@
 const router    = require('express').Router();
+const multer    = require('multer');
+const XLSX      = require('xlsx');
 const db        = require('../db');
 const protect   = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
+
+const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const ORDER_SELECT = `
   SELECT o.id, o.po_number, o.container_type, o.currency, o.status, o.priority,
@@ -15,8 +19,12 @@ const ORDER_SELECT = `
          COALESCE(o.demurrage_rate,0)  AS demurrage_rate,
          o.container_returned_date,
          COALESCE(o.doc_checklist,'{}')::jsonb AS doc_checklist,
+         o.loading_date, o.delivered_date, o.usd_rate_delivery, o.status_changed_at,
+         COALESCE(o.cha_charges,0)     AS cha_charges,
+         COALESCE(o.extra_charges,0)   AS extra_charges,
+         COALESCE(o.usd_rate,0)        AS usd_rate,
          (o.status NOT IN ('Draft','Tentative','Confirmed')) AS shipped,
-         (o.status = 'Delivered')                          AS delivered,
+         (o.status IN ('Delivered','Paid'))                  AS delivered,
          s.id AS supplier_id, s.code AS supplier_code, s.name AS supplier, s.base_currency, s.payment_terms_days
   FROM import_orders o
   JOIN suppliers s ON o.supplier_id = s.id
@@ -31,8 +39,9 @@ async function saveItems(client, orderId, items) {
       INSERT INTO order_items
         (order_id, item_name, thickness, size, liner_color,
          qty_ctn, total_ctn, total_roll,
-         unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm, marking)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm, marking,
+         price_per_sqm, brand, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
     `, [
       orderId,
       item.item_name     || '',
@@ -50,6 +59,9 @@ async function saveItems(client, orderId, items) {
       parseInt(item.total_roll)   || 0,
       parseFloat(item.cbm)        || 0,
       item.marking       || '',
+      parseFloat(item.price_per_sqm) || 0,
+      item.brand         || '',
+      item.notes         || '',
     ]);
   }
 }
@@ -99,17 +111,67 @@ router.get('/', protect, async (req, res) => {
 router.get('/kanban', protect, async (req, res) => {
   try {
     const { rows } = await db.query(`
-      SELECT o.id, o.po_number, s.name AS supplier, o.container_type, o.total_value, o.status
+      SELECT o.id, o.po_number, s.name AS supplier, o.container_type, o.total_value, o.status,
+             o.loading_date, o.freight_cost, o.shipment_date, o.bl_number, o.insurance_cost,
+             o.eta, o.etd, o.delivered_date, o.cha_charges, o.usd_rate_delivery,
+             o.payment_due_date, COALESCE(o.free_days,7) AS free_days,
+             COALESCE(o.demurrage_rate,0)::float AS demurrage_rate, o.status_changed_at,
+             COALESCE(o.doc_checklist,'{}')::jsonb AS doc_checklist,
+             (SELECT COUNT(*)::int FROM payments p WHERE p.order_id = o.id) AS payment_count
       FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id ORDER BY o.created_at DESC
     `);
     const groups = {};
     rows.forEach(r => {
       if (!groups[r.status]) groups[r.status] = [];
-      groups[r.status].push({ id: r.id, po_number: r.po_number, supplier: r.supplier, container: r.container_type, value: parseFloat(r.total_value) });
+      groups[r.status].push({
+        id: r.id, po_number: r.po_number, supplier: r.supplier, container: r.container_type,
+        value: parseFloat(r.total_value) || 0, status: r.status,
+        loading_date: r.loading_date, freight_cost: parseFloat(r.freight_cost) || 0,
+        shipment_date: r.shipment_date, bl_number: r.bl_number,
+        insurance_cost: parseFloat(r.insurance_cost) || 0,
+        eta: r.eta, etd: r.etd, delivered_date: r.delivered_date,
+        cha_charges: parseFloat(r.cha_charges) || 0, usd_rate_delivery: r.usd_rate_delivery,
+        payment_due_date: r.payment_due_date, free_days: r.free_days,
+        demurrage_rate: r.demurrage_rate, status_changed_at: r.status_changed_at,
+        doc_checklist: r.doc_checklist, payment_count: r.payment_count,
+      });
     });
     res.json(groups);
   } catch (err) {
     console.error('[orders/kanban]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/orders/forecast — containers expected to ship, bucketed by ETD.
+router.get('/forecast', protect, async (req, res) => {
+  try {
+    const { rows } = await db.query(`
+      SELECT o.id, o.po_number, s.name AS supplier, o.container_type, o.etd,
+             o.total_value::float AS value, o.status
+      FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id
+      WHERE o.status IN ('Confirmed','Loaded') AND o.etd IS NOT NULL
+      ORDER BY o.etd ASC
+    `);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const eow = new Date(today); eow.setDate(today.getDate() + (7 - today.getDay()));
+    const eom = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59);
+    const b = { overdue: [], this_week: [], this_month: [], later: [] };
+    rows.forEach(r => {
+      const d = new Date(r.etd);
+      if (d < today) b.overdue.push(r);
+      else if (d <= eow) b.this_week.push(r);
+      else if (d <= eom) b.this_month.push(r);
+      else b.later.push(r);
+    });
+    const sum = (a) => Math.round(a.reduce((s, x) => s + (x.value || 0), 0) * 100) / 100;
+    res.json({
+      counts: { overdue: b.overdue.length, this_week: b.this_week.length, this_month: b.this_month.length, later: b.later.length, total: rows.length },
+      value: { overdue: sum(b.overdue), this_week: sum(b.this_week), this_month: sum(b.this_month) },
+      buckets: b,
+    });
+  } catch (err) {
+    console.error('[orders/forecast]', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -245,9 +307,11 @@ async function copyOrder(client, sourceId, opts = {}) {
   await client.query(`
     INSERT INTO order_items
       (order_id, sku_id, item_name, thickness, size, liner_color, qty_ctn, total_ctn,
-       total_roll, unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm)
+       total_roll, unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm,
+       marking, price_per_sqm, brand, notes)
     SELECT $1, sku_id, item_name, thickness, size, liner_color, qty_ctn, total_ctn,
-           total_roll, unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm
+           total_roll, unit_price, weight, kg_pkg, code, shipping_mark, quantity, cbm,
+           marking, price_per_sqm, brand, notes
     FROM order_items WHERE order_id = $2
   `, [created[0].id, sourceId]);
   return created[0];
@@ -393,6 +457,113 @@ router.post('/', protect, authorize('owner', 'manager', 'staff'), async (req, re
   } finally { client.release(); }
 });
 
+// ── Excel / CSV import of historical orders ────────────────────────────────────
+const IMPORT_COLUMNS = ['po_number','supplier_code','container_type','status','marking','etd','eta',
+  'item_name','brand','thickness','size','liner_color','qty_ctn','total_ctn','total_roll',
+  'unit_price','price_per_sqm','kg_pkg','code','marking_item','shipping_mark','item_notes'];
+
+// GET /api/orders/import/template — downloadable .xlsx template with an example row
+router.get('/import/template', protect, authorize('owner', 'manager', 'staff'), (req, res) => {
+  const example = {
+    po_number: 'ISLB 00126', supplier_code: 'ISLB', container_type: '40HQ', status: 'Delivered',
+    marking: 'BATCH-A', etd: '2025-01-10', eta: '2025-02-05',
+    item_name: 'DS TISSUE TAPE HB', brand: 'STUK', thickness: '0.9MM', size: '1000MM x 50M',
+    liner_color: 'YELLOW', qty_ctn: 24, total_ctn: 100, total_roll: 2400, unit_price: 2.35,
+    price_per_sqm: 0.047, kg_pkg: 12.5, code: 'IS-57145V', marking_item: '1MM',
+    shipping_mark: 'INSULATION TAPE', item_notes: '',
+  };
+  const ws = XLSX.utils.json_to_sheet([example], { header: IMPORT_COLUMNS });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Orders');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="orders_import_template.xlsx"');
+  res.send(buf);
+});
+
+// POST /api/orders/import — bulk import from .xlsx / .xls / .csv (staff+).
+// One row per line item; rows group into orders by po_number. Supplier matched by code.
+router.post('/import', protect, authorize('owner', 'manager', 'staff'), uploadMem.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  let rows;
+  try {
+    const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: true });
+  } catch (e) { return res.status(400).json({ error: 'Could not parse file. Use the provided template.' }); }
+  if (!rows.length) return res.status(400).json({ error: 'File has no data rows' });
+
+  // Excel dates arrive as Date objects or serial numbers → normalise to YYYY-MM-DD
+  const xlDate = (v) => {
+    if (v === '' || v == null) return null;
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = String(v).trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const d = XLSX.SSF.parse_date_code(parseFloat(s));
+      if (d) return `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
+    }
+    return s || null;
+  };
+  const norm = (v) => (v == null ? '' : String(v).trim());
+
+  const { rows: sups } = await db.query('SELECT id, LOWER(code) AS code FROM suppliers');
+  const supByCode = new Map(sups.map(s => [s.code, s.id]));
+  const groups = new Map();
+  const errors = [];
+
+  rows.forEach((r, i) => {
+    const sid = supByCode.get(norm(r.supplier_code).toLowerCase());
+    if (!sid) { errors.push(`Row ${i + 2}: unknown supplier_code "${norm(r.supplier_code)}"`); return; }
+    const po = norm(r.po_number);
+    const key = po || `__${sid}__${norm(r.marking)}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        po_number: po, supplier_id: sid,
+        container_type: norm(r.container_type) || '40HQ',
+        status: norm(r.status) || 'Delivered',
+        marking: norm(r.marking) || null,
+        etd: xlDate(r.etd), eta: xlDate(r.eta), items: [],
+      });
+    }
+    if (norm(r.item_name)) {
+      groups.get(key).items.push({
+        item_name: norm(r.item_name), brand: norm(r.brand), thickness: norm(r.thickness),
+        size: norm(r.size), liner_color: norm(r.liner_color), qty_ctn: r.qty_ctn,
+        total_ctn: r.total_ctn, total_roll: r.total_roll, unit_price: r.unit_price,
+        price_per_sqm: r.price_per_sqm, kg_pkg: r.kg_pkg, code: norm(r.code),
+        marking: norm(r.marking_item), shipping_mark: norm(r.shipping_mark),
+        notes: norm(r.item_notes), cbm: 0,
+      });
+    }
+  });
+
+  const client = await db.pool.connect();
+  let created = 0;
+  try {
+    await client.query('BEGIN');
+    for (const g of groups.values()) {
+      const po = g.po_number || await nextPoNumber(client, g.supplier_id);
+      const t = calcTotals(g.items);
+      const { rows: ins } = await client.query(`
+        INSERT INTO import_orders
+          (po_number, supplier_id, container_type, status, marking, etd, eta,
+           total_quantity, total_weight, total_cbm, total_value, currency)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'USD')
+        ON CONFLICT (po_number) DO NOTHING RETURNING id
+      `, [po, g.supplier_id, g.container_type, g.status, g.marking, g.etd, g.eta,
+          t.total_quantity, t.total_weight, t.total_cbm, t.total_value]);
+      if (!ins[0]) { errors.push(`PO "${po}" already exists — skipped`); continue; }
+      if (g.items.length) await saveItems(client, ins[0].id, g.items);
+      created++;
+    }
+    await client.query('COMMIT');
+    res.json({ created, groups: groups.size, errors });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[orders/import]', err);
+    res.status(500).json({ error: 'Import failed: ' + err.message, errors });
+  } finally { client.release(); }
+});
+
 // PUT /api/orders/:id — update (staff+)
 router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { supplier_id, container_type, currency, status, marking,
@@ -400,9 +571,14 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
           utilization_percentage, eta, etd, bl_number, shipment_date,
           payment_due_date, notes, items,
           freight_cost, insurance_cost, duty_rate, free_days, demurrage_rate,
-          container_returned_date, doc_checklist, priority } = req.body;
+          container_returned_date, doc_checklist, priority,
+          cha_charges, extra_charges, usd_rate,
+          loading_date, delivered_date, usd_rate_delivery } = req.body;
 
   const totals = (items && items.length) ? calcTotals(items) : { total_quantity, total_weight, total_cbm, total_value };
+
+  // Empty strings from the form must become NULL — Postgres rejects '' for date/numeric
+  const dnull = (v) => (v === '' || v === undefined || v === null) ? null : v;
 
   const dueDateProvided = payment_due_date !== undefined;
   let dueDateVal = dueDateProvided ? (payment_due_date || null) : undefined;
@@ -447,20 +623,28 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
         container_returned_date= COALESCE($23, container_returned_date),
         doc_checklist          = COALESCE($24, doc_checklist),
         priority               = COALESCE($25, priority),
+        cha_charges            = COALESCE($27, cha_charges),
+        extra_charges          = COALESCE($28, extra_charges),
+        usd_rate               = COALESCE($29, usd_rate),
+        loading_date           = COALESCE($30, loading_date),
+        delivered_date         = COALESCE($31, delivered_date),
+        usd_rate_delivery      = COALESCE($32, usd_rate_delivery),
         updated_at             = NOW()
       WHERE id = $17
     `, [supplier_id, container_type, currency, status, marking ?? null,
         totals.total_quantity, totals.total_weight, totals.total_cbm, totals.total_value,
-        utilization_percentage, eta ?? null, notes ?? null,
-        etd ?? null, bl_number ?? null, shipment_date ?? null,
-        dueDateVal !== undefined ? dueDateVal : null,
+        utilization_percentage, dnull(eta), notes ?? null,
+        dnull(etd), bl_number ?? null, dnull(shipment_date),
+        dueDateVal !== undefined ? dnull(dueDateVal) : null,
         req.params.id,
-        freight_cost ?? null, insurance_cost ?? null, duty_rate ?? null,
-        free_days ?? null, demurrage_rate ?? null,
-        container_returned_date ?? null,
+        dnull(freight_cost), dnull(insurance_cost), dnull(duty_rate),
+        dnull(free_days), dnull(demurrage_rate),
+        dnull(container_returned_date),
         doc_checklist ? JSON.stringify(doc_checklist) : null,
         priority ?? null,
-        dueDateProvided]);
+        dueDateProvided,
+        dnull(cha_charges), dnull(extra_charges), dnull(usd_rate),
+        dnull(loading_date), dnull(delivered_date), dnull(usd_rate_delivery)]);
     if (items) await saveItems(client, req.params.id, items);
     await client.query('COMMIT');
     const { rows } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [req.params.id]);
@@ -477,11 +661,11 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
 // PATCH /api/orders/:id/status — staff+
 router.patch('/:id/status', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
   const { status } = req.body;
-  const VALID = ['Draft','Tentative','Confirmed','Loaded','Shipped','In Transit','Arrived','Customs Clearance','Cleared','Delivered'];
+  const VALID = ['Draft','Tentative','Confirmed','Loaded','Shipped','In Transit','Arrived','Customs Clearance','Cleared','Delivered','Paid'];
   if (!VALID.includes(status)) return res.status(400).json({ error: 'Invalid status' });
   try {
     const { rows } = await db.query(
-      'UPDATE import_orders SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING id, status',
+      'UPDATE import_orders SET status = $1, status_changed_at = NOW(), updated_at = NOW() WHERE id = $2 RETURNING id, status',
       [status, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
