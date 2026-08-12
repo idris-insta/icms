@@ -5,6 +5,7 @@ const fs        = require('fs');
 const db        = require('../db');
 const protect   = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
+const { scanDocument } = require('../services/ocr');
 
 const uploadDir = process.env.UPLOAD_DIR || './uploads';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -42,6 +43,65 @@ const upload = multer({
     }
     cb(null, true);
   },
+});
+
+// Scanning keeps the file in memory — it is read, not stored, unless the
+// caller also uploads it through /upload.
+const scanUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_MIME.has(file.mimetype) || !ALLOWED_EXT.has(ext)) return cb(new Error('File type not allowed'));
+    cb(null, true);
+  },
+});
+
+// POST /api/documents/scan — read a document and return the fields found in it.
+// Body: file (multipart), doc_type (optional hint, e.g. "Bill of Lading").
+router.post('/scan', protect, authorize('owner', 'manager', 'staff'), (req, res, next) => {
+  scanUpload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 20 MB)' : err.message });
+    }
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const result = await scanDocument(req.file.buffer, req.file.mimetype, req.file.originalname, req.body.doc_type);
+    res.json(result);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('[documents/scan]', err);
+    res.status(500).json({ error: 'Could not read this document' });
+  }
+});
+
+// GET /api/documents/scan-status — what the scanner can do right now (drives the UI)
+router.get('/scan-status', protect, async (req, res) => {
+  try {
+    const { rows } = await db.query("SELECT key, value FROM settings WHERE key LIKE 'ai_%'");
+    const s = {}; rows.forEach(r => { s[r.key] = r.value; });
+    const url = (s.ai_ollama_url || 'http://localhost:11434').replace(/\/$/, '');
+    let models = [];
+    try {
+      const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2500) });
+      if (r.ok) models = ((await r.json()).models || []).map(m => m.name);
+    } catch (_) {}
+    const hints = ['vision', 'llava', 'minicpm', 'moondream', 'bakllava', 'qwen2.5vl', 'qwen2-vl'];
+    res.json({
+      pdf_text: true,                                                   // always available
+      image_ocr: models.some(m => hints.some(h => m.toLowerCase().includes(h))),
+      ai_fields: (s.ai_provider || 'none') !== 'none',
+      models,
+      ollama_url: url,
+    });
+  } catch (err) {
+    console.error('[documents/scan-status]', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // GET /api/documents?order_id=

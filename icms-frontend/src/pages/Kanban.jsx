@@ -83,6 +83,9 @@ const TransitionModal = ({ order, toCol, onClose, onDone }) => {
   const [files, setFiles] = useState({});
   const [fx, setFx] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [scanning, setScanning] = useState(null);  // doc name currently being read
+  const [scan, setScan] = useState(null);          // { fields, source, ai_used }
+  const [scanCap, setScanCap] = useState(null);    // what the scanner supports
 
   useEffect(() => {
     const init = {};
@@ -109,8 +112,62 @@ const TransitionModal = ({ order, toCol, onClose, onDone }) => {
     }).catch(() => {});
   }, [order, toCol]);
 
+  useEffect(() => { apiFetch("/documents/scan-status").then(setScanCap).catch(() => {}); }, []);
+
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
   const reqMissing = (rule.fields || []).filter(f => f.req && (form[f.k] === "" || form[f.k] == null));
+
+  // Read a document and offer its values for this stage's fields.
+  const scanFile = async (doc) => {
+    const file = files[doc];
+    if (!file || scanning) return;
+    setScanning(doc); setScan(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file); fd.append("doc_type", doc);
+      const r = await apiUpload("/documents/scan", fd);
+      if (!Object.keys(r.fields || {}).length) {
+        toast("Nothing recognised in that file", "warn");
+      } else {
+        setScan({ ...r, doc });
+      }
+    } catch (e) { toast(e.message, "error"); }
+    finally { setScanning(null); }
+  };
+
+  // Which scanned values line up with the fields this stage is asking for.
+  // "Shipped on board" doubles as the shipment date when that field is blank.
+  const scanMatches = () => {
+    if (!scan) return [];
+    const f = scan.fields || {};
+    const keys = new Set((rule.fields || []).map(x => x.k));
+    const out = [];
+    const push = (k, v, label) => { if (v != null && v !== "" && keys.has(k)) out.push({ k, v, label }); };
+    push("bl_number", f.bl_number, "BL number");
+    push("etd", f.etd, "ETD");
+    push("eta", f.eta, "ETA");
+    push("shipment_date", f.etd, "Shipment date (shipped on board)");
+    return out;
+  };
+  const applyScan = () => {
+    const m = scanMatches();
+    if (!m.length) { toast("No matching fields for this stage", "info"); return; }
+    setForm(p => { const n = { ...p }; m.forEach(x => { n[x.k] = x.v; }); return n; });
+    toast(`Filled ${m.length} field${m.length > 1 ? "s" : ""}`, "success");
+    setScan(null);
+  };
+  // Everything else the document gave us — shown for reference, not stored.
+  const scanExtras = () => {
+    if (!scan) return [];
+    const applied = new Set(scanMatches().map(x => x.k));
+    const nice = { invoice_number: "Invoice no", vessel: "Vessel", container_no: "Container",
+      seal_number: "Seal", port_of_loading: "POL", port_of_discharge: "POD",
+      gross_weight_kg: "Gross kg", cbm: "CBM", total_cartons: "Cartons",
+      total_amount: "Total", currency: "Currency", incoterm: "Terms" };
+    return Object.entries(scan.fields || {})
+      .filter(([k, v]) => nice[k] && !applied.has(k) && v !== "" && v != null)
+      .map(([k, v]) => `${nice[k]}: ${Array.isArray(v) ? v.join(", ") : v}`);
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -170,16 +227,65 @@ const TransitionModal = ({ order, toCol, onClose, onDone }) => {
 
         {(rule.docs || []).length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "#374151", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.04em" }}>Documents</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#374151", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              Documents <span style={{ fontWeight: 400, textTransform: "none", color: "#94a3b8" }}>— attach a file, then Scan to read it</span>
+            </div>
             {rule.docs.map(doc => (
-              <div key={doc} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderTop: "1px solid #f1f5f9" }}>
+              <div key={doc} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid #f1f5f9" }}>
                 <input type="checkbox" id={`d-${doc}`} checked={!!docs[doc]}
                   onChange={e => setDocs(p => ({ ...p, [doc]: e.target.checked }))} style={{ width: 16, height: 16 }} />
                 <label htmlFor={`d-${doc}`} style={{ flex: 1, fontSize: 13 }}>{doc}</label>
-                <input type="file" onChange={e => { const f = e.target.files[0]; setFiles(p => ({ ...p, [doc]: f })); if (f) setDocs(p => ({ ...p, [doc]: true })); }}
-                  style={{ fontSize: 11, maxWidth: 180 }} />
+                <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp"
+                  onChange={e => { const f = e.target.files[0]; setFiles(p => ({ ...p, [doc]: f })); if (f) setDocs(p => ({ ...p, [doc]: true })); }}
+                  style={{ fontSize: 11, maxWidth: 150 }} />
+                <button type="button" onClick={() => scanFile(doc)} disabled={!files[doc] || !!scanning}
+                  title={files[doc] ? "Read this file and fill the fields above" : "Attach a file first"}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 9px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                           border: "1px solid " + (files[doc] ? "#a5f3fc" : "#e2e8f0"),
+                           background: files[doc] ? "#ecfeff" : "#f8fafc",
+                           color: files[doc] ? "#0369a1" : "#cbd5e1",
+                           cursor: (files[doc] && !scanning) ? "pointer" : "not-allowed", whiteSpace: "nowrap" }}>
+                  <Ic n="search" size={12} /> {scanning === doc ? "Reading…" : "Scan"}
+                </button>
               </div>
             ))}
+            {scanCap && !scanCap.image_ocr && (
+              <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 6 }}>
+                PDFs with a text layer read instantly. For photos and scanned pages, pull a vision model — <code>ollama pull llama3.2-vision</code>
+              </div>
+            )}
+          </div>
+        )}
+
+        {scan && (
+          <div style={{ marginTop: 14, padding: 12, background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#0369a1", marginBottom: 8 }}>
+              <Ic n="check" size={14} /> Read from {scan.doc}
+              <span style={{ fontWeight: 400, color: "#64748b", fontSize: 11 }}>
+                ({scan.source}{scan.ai_used ? " + AI" : ""})
+              </span>
+              <button onClick={() => setScan(null)} aria-label="Dismiss" style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#64748b", fontSize: 16, lineHeight: 1 }}>×</button>
+            </div>
+            {scanMatches().length > 0 ? (
+              <>
+                {scanMatches().map(m => (
+                  <div key={m.k} style={{ fontSize: 12.5, color: "#0f172a", padding: "2px 0" }}>
+                    <b>{m.label}:</b> {m.v}
+                  </div>
+                ))}
+                <button onClick={applyScan}
+                  style={{ marginTop: 8, padding: "6px 14px", background: "#0369a1", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  Fill these fields
+                </button>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: "#64748b" }}>Nothing this stage asks for was found in the document.</div>
+            )}
+            {scanExtras().length > 0 && (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #bae6fd", fontSize: 11, color: "#475569" }}>
+                <b>Also on the document:</b> {scanExtras().join(" · ")}
+              </div>
+            )}
           </div>
         )}
 
