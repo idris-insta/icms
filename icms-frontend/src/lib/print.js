@@ -18,13 +18,13 @@ const printPO = async (orderId) => {
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
   const rows = items.map((it, i) => `
     <tr>
-      <td>${i + 1}</td><td class="l">${esc(it.item_name)}</td><td>${esc(it.thickness)}</td>
+      <td>${i + 1}</td><td class="l">${esc(it.item_name)}</td><td class="l">${esc(it.brand)}</td><td>${esc(it.thickness)}</td>
       <td>${esc(it.size)}</td><td>${esc(it.liner_color)}</td><td class="r">${it.qty_ctn || ""}</td>
       <td class="r">${it.total_ctn || 0}</td><td class="r">${it.total_roll || 0}</td>
       <td class="r">${parseFloat(it.unit_price || 0).toFixed(2)}</td>
       <td class="r">${((parseInt(it.total_roll) || 0) * (parseFloat(it.unit_price) || 0)).toFixed(2)}</td>
       <td class="r">${it.kg_pkg || ""}</td><td class="r">${parseFloat(it.cbm || 0).toFixed(3)}</td>
-      <td class="l">${esc(it.code)}</td><td class="l">${esc(it.marking)}</td><td class="l">${esc(it.shipping_mark)}</td>
+      <td class="l">${esc(it.code)}</td><td class="l">${esc(it.marking)}</td><td class="l">${esc(it.shipping_mark)}</td><td class="l">${esc(it.notes)}</td>
     </tr>`).join("");
   const html = `<!DOCTYPE html><html><head><title>${esc(o.po_number)} — Purchase Order</title><style>
     body{font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#111;margin:28px}
@@ -57,9 +57,9 @@ const printPO = async (orderId) => {
       <div><b>BL Number</b>${esc(o.bl_number) || "—"}</div>
     </div>
     <table>
-      <thead><tr><th>#</th><th>Item</th><th>Thickness</th><th>Size</th><th>Liner</th><th>Qty/Ctn</th><th>Total Ctn</th><th>Total Roll</th><th>Price $</th><th>Total $</th><th>KG/Pkg</th><th>CBM</th><th>Code</th><th>Marking</th><th>Shipping Mark</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="15">No line items</td></tr>`}</tbody>
-      <tfoot><tr><td colspan="6" class="l">TOTALS</td><td class="r">${tCtn.toLocaleString()}</td><td class="r">${tRoll.toLocaleString()}</td><td></td><td class="r">$${tVal.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td class="r">${tKg.toLocaleString()} kg</td><td class="r">${tCbm.toFixed(3)}</td><td colspan="3"></td></tr></tfoot>
+      <thead><tr><th>#</th><th>Item</th><th>Brand</th><th>Thickness</th><th>Size</th><th>Liner</th><th>Qty/Ctn</th><th>Total Ctn</th><th>Total Roll</th><th>Price $</th><th>Total $</th><th>KG/Pkg</th><th>CBM</th><th>Code</th><th>Marking</th><th>Shipping Mark</th><th>Notes</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="17">No line items</td></tr>`}</tbody>
+      <tfoot><tr><td colspan="7" class="l">TOTALS</td><td class="r">${tCtn.toLocaleString()}</td><td class="r">${tRoll.toLocaleString()}</td><td></td><td class="r">$${tVal.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td class="r">${tKg.toLocaleString()} kg</td><td class="r">${tCbm.toFixed(3)}</td><td colspan="4"></td></tr></tfoot>
     </table>
     ${o.notes ? `<p><b>Notes:</b> ${esc(o.notes)}</p>` : ""}
     <div class="sign"><div>Prepared by</div><div>Approved by</div><div>Supplier confirmation</div></div>
@@ -154,22 +154,22 @@ const printOrdersDetailed = async (orders) => {
     const tKg   = items.reduce((s, it) => s + (parseInt(it.total_ctn)  || 0) * (parseFloat(it.kg_pkg)    || 0), 0);
     const tCbm  = items.reduce((s, it) => s + (parseFloat(it.cbm) || 0), 0);
     const rows = items.map((it, i) => `<tr>
-        <td>${i + 1}</td><td class="l">${esc(it.item_name)}</td><td>${esc(it.thickness)}</td>
+        <td>${i + 1}</td><td class="l">${esc(it.item_name)}</td><td class="l">${esc(it.brand)}</td><td>${esc(it.thickness)}</td>
         <td>${esc(it.size)}</td><td>${esc(it.liner_color)}</td><td class="r">${it.qty_ctn || ""}</td>
         <td class="r">${it.total_ctn || 0}</td><td class="r">${it.total_roll || 0}</td>
         <td class="r">${parseFloat(it.unit_price || 0).toFixed(2)}</td>
         <td class="r">${((parseInt(it.total_roll)||0)*(parseFloat(it.unit_price)||0)).toFixed(2)}</td>
         <td class="r">${it.kg_pkg || ""}</td><td class="r">${parseFloat(it.cbm || 0).toFixed(3)}</td>
-        <td class="l">${esc(it.code)}</td><td class="l">${esc(it.marking)}</td><td class="l">${esc(it.shipping_mark)}</td>
+        <td class="l">${esc(it.code)}</td><td class="l">${esc(it.marking)}</td><td class="l">${esc(it.shipping_mark)}</td><td class="l">${esc(it.notes)}</td>
       </tr>`).join("");
     return `<div class="po">
       <div class="pohead"><span class="b">${esc(o.po_number)}</span> — ${esc(o.supplier)} (${esc(o.supplier_code)})
         &nbsp;·&nbsp; ${esc(o.container_type)} ·  ${esc(o.currency)} · ${esc(o.status)}
         &nbsp;·&nbsp; ETD ${fd(o.etd)} · ETA ${fd(o.eta)} · BL ${esc(o.bl_number) || "—"}</div>
       <table>
-        <thead><tr><th>#</th><th>Item</th><th>Thick</th><th>Size</th><th>Liner</th><th>Qty/Ctn</th><th>Tot Ctn</th><th>Tot Roll</th><th>Price $</th><th>Total $</th><th>KG/Pkg</th><th>CBM</th><th>Code</th><th>Marking</th><th>Ship Mark</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="15">No line items</td></tr>`}</tbody>
-        <tfoot><tr><td colspan="6" class="l">TOTALS</td><td class="r">${tCtn.toLocaleString()}</td><td class="r">${tRoll.toLocaleString()}</td><td></td><td class="r">$${tVal.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td class="r">${tKg.toLocaleString()} kg</td><td class="r">${tCbm.toFixed(3)}</td><td colspan="3"></td></tr></tfoot>
+        <thead><tr><th>#</th><th>Item</th><th>Brand</th><th>Thick</th><th>Size</th><th>Liner</th><th>Qty/Ctn</th><th>Tot Ctn</th><th>Tot Roll</th><th>Price $</th><th>Total $</th><th>KG/Pkg</th><th>CBM</th><th>Code</th><th>Marking</th><th>Ship Mark</th><th>Notes</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="17">No line items</td></tr>`}</tbody>
+        <tfoot><tr><td colspan="7" class="l">TOTALS</td><td class="r">${tCtn.toLocaleString()}</td><td class="r">${tRoll.toLocaleString()}</td><td></td><td class="r">$${tVal.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td class="r">${tKg.toLocaleString()} kg</td><td class="r">${tCbm.toFixed(3)}</td><td colspan="4"></td></tr></tfoot>
       </table>
     </div>`;
   }).join("");

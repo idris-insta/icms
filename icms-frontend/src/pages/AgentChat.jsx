@@ -24,7 +24,31 @@ const AgentChat = () => {
     } finally { setBusy(false); }
   };
 
+  // One-click agent actions
+  const runAction = async (ep, label) => {
+    if (busy) return;
+    setMsgs(m => [...m, { role: "user", text: label }]);
+    setBusy(true);
+    try {
+      const r = await apiFetch(`/agent/${ep}`, { method: "POST", body: JSON.stringify({}) });
+      setMsgs(m => [...m, { role: "ai", text: r.answer || "(no answer)" }]);
+    } catch (e) { setMsgs(m => [...m, { role: "ai", text: `⚠️ ${e.message}` }]); }
+    finally { setBusy(false); }
+  };
+  // Extract a draft order from invoice text pasted into the input box
+  const extractDoc = async () => {
+    const text = input.trim();
+    if (!text || busy) { setMsgs(m => [...m, { role: "ai", text: "Paste the invoice / PI text into the box first, then tap Doc→order." }]); return; }
+    setInput(""); setMsgs(m => [...m, { role: "user", text: "Extract order from invoice text" }]); setBusy(true);
+    try {
+      const r = await apiFetch("/agent/extract", { method: "POST", body: JSON.stringify({ text }) });
+      setMsgs(m => [...m, { role: "ai", text: "Draft order extracted:\n" + JSON.stringify(r.draft, null, 2) + "\n\nReview it, then create the order in Orders." }]);
+    } catch (e) { setMsgs(m => [...m, { role: "ai", text: `⚠️ ${e.message}` }]); }
+    finally { setBusy(false); }
+  };
+
   const SUGGESTIONS = ["Which POs need payment this week?", "Summarize supplier balances", "Which containers are arriving soon?", "Draft a follow-up email for overdue shipments"];
+  const ACTIONS = [["triage", "Daily triage"], ["fx-advisor", "FX advisor"]];
 
   return (
     <>
@@ -48,6 +72,14 @@ const AgentChat = () => {
               <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "85%", padding: "9px 13px", borderRadius: 12, fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", background: m.role === "user" ? "#4f46e5" : "#f1f5f9", color: m.role === "user" ? "#fff" : "#0f172a" }}>{m.text}</div>
             ))}
             {busy && <div style={{ color: "#94a3b8", fontSize: 12 }}>Thinking…</div>}
+          </div>
+          <div style={{ display: "flex", gap: 6, padding: "8px 10px 0", flexWrap: "wrap" }}>
+            {ACTIONS.map(([ep, label]) => (
+              <button key={ep} onClick={() => runAction(ep, label)} disabled={busy}
+                style={{ padding: "5px 10px", background: "#eef2ff", border: "1px solid #ddd6fe", borderRadius: 20, cursor: "pointer", fontSize: 11, color: "#4f46e5", fontWeight: 600 }}>{label}</button>
+            ))}
+            <button onClick={extractDoc} disabled={busy}
+              style={{ padding: "5px 10px", background: "#ecfeff", border: "1px solid #a5f3fc", borderRadius: 20, cursor: "pointer", fontSize: 11, color: "#0369a1", fontWeight: 600 }}>Doc→order</button>
           </div>
           <div style={{ padding: 10, borderTop: "1px solid #e2e8f0", display: "flex", gap: 8 }}>
             <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}

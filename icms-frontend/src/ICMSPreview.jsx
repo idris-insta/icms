@@ -56,7 +56,7 @@ export default function App() {
     masters:   <Masters />,
     documents: <Documents />,
     reports:   <Reports />,
-    settings:  <Settings />,
+    settings:  <Settings user={user} />,
   };
 
   return (

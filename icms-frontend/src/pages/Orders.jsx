@@ -1,6 +1,56 @@
 import { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } from "react";
-import { apiFetch, apiUpload, apiDownload, useToast, useConfirm, exportCSV, fmtINR, fmtUSD, fmtCur, STATUS_STYLE, KANBAN_COL_COLOR, STATUSES, CONTAINER_TYPES, CURRENCIES, PRIORITY_COLOR, PRIORITY_BG, Badge, PriorityBadge, BarChart, Progress, Spinner, Err, KPICard, TH, TD } from "../lib/core";
+import { apiFetch, apiUpload, apiDownload, useToast, useConfirm, exportCSV, fmtINR, fmtUSD, fmtCur, STATUS_STYLE, KANBAN_COL_COLOR, STATUSES, CONTAINER_TYPES, CURRENCIES, PRIORITY_COLOR, PRIORITY_BG, Badge, PriorityBadge, BarChart, Progress, Spinner, Err, KPICard, TH, TD, Ic } from "../lib/core";
 import { printPO, printOrderList, printOrdersDetailed } from "../lib/print";
+
+// ─── CONTAINER LOAD PLANNER ───────────────────────────────────────────────────
+const CONTAINER_CAP = { "20FT": { cbm: 33, kg: 28000 }, "40FT": { cbm: 67, kg: 26500 }, "40HC": { cbm: 76, kg: 26500 }, "40HQ": { cbm: 76, kg: 26500 } };
+const LoadPlanner = ({ onClose }) => {
+  const [ct, setCt] = useState("40HQ");
+  const [cbm, setCbm] = useState("0.08");
+  const [wt, setWt] = useState("12");
+  const [rolls, setRolls] = useState("24");
+  const [price, setPrice] = useState("");
+  const cap = CONTAINER_CAP[ct] || CONTAINER_CAP["40HQ"];
+  const c = parseFloat(cbm) || 0, w = parseFloat(wt) || 0;
+  const maxByCbm = c > 0 ? Math.floor(cap.cbm / c) : 0;
+  const maxByWt  = w > 0 ? Math.floor(cap.kg / w) : 0;
+  const cartons = Math.min(maxByCbm || Infinity, maxByWt || Infinity);
+  const fit = Number.isFinite(cartons) ? cartons : 0;
+  const limit = (maxByCbm && maxByWt) ? (maxByCbm <= maxByWt ? "volume (CBM)" : "weight") : maxByCbm ? "volume (CBM)" : "weight";
+  const usedCbm = fit * c, usedKg = fit * w;
+  const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 6, padding: "7px 9px", fontSize: 13, outline: "none" };
+  const lbl = { display: "block", fontSize: 11, fontWeight: 700, color: "#374151", marginBottom: 4 };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: "100%", maxWidth: 480 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <span style={{ fontWeight: 800, fontSize: 16, display: "inline-flex", alignItems: "center", gap: 8 }}><Ic n="kanban" size={17} /> Container Load Planner</span>
+          <button onClick={onClose} aria-label="Close" style={{ border: "none", background: "none", cursor: "pointer", fontSize: 20, color: "#64748b", padding: 4 }}>×</button>
+        </div>
+        <div style={{ fontSize: 12, color: "#64748b", marginBottom: 16 }}>Max cartons that fit one container, by volume and weight.</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div><label style={lbl}>Container</label><select style={inp} value={ct} onChange={e => setCt(e.target.value)}>{["20FT","40FT","40HC","40HQ"].map(x => <option key={x}>{x}</option>)}</select></div>
+          <div><label style={lbl}>Capacity</label><div style={{ ...inp, background: "#f8fafc", color: "#475569" }}>{cap.cbm} m³ · {cap.kg / 1000}t</div></div>
+          <div><label style={lbl}>CBM / carton (m³)</label><input type="number" style={inp} value={cbm} onChange={e => setCbm(e.target.value)} /></div>
+          <div><label style={lbl}>Weight / carton (kg)</label><input type="number" style={inp} value={wt} onChange={e => setWt(e.target.value)} /></div>
+          <div><label style={lbl}>Rolls / carton</label><input type="number" style={inp} value={rolls} onChange={e => setRolls(e.target.value)} /></div>
+          <div><label style={lbl}>Price / roll $ (opt)</label><input type="number" style={inp} value={price} onChange={e => setPrice(e.target.value)} /></div>
+        </div>
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: 16 }}>
+          <div style={{ fontSize: 13, color: "#15803d", fontWeight: 600, marginBottom: 8 }}>
+            Fits ~<b style={{ fontSize: 22 }}>{fit.toLocaleString()}</b> cartons <span style={{ color: "#64748b", fontWeight: 400 }}>(limited by {limit})</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 12.5 }}>
+            <span>Total rolls: <b>{(fit * (parseInt(rolls) || 0)).toLocaleString()}</b></span>
+            <span>Used volume: <b>{usedCbm.toFixed(1)} m³</b> ({Math.round(usedCbm / cap.cbm * 100)}%)</span>
+            <span>Used weight: <b>{(usedKg / 1000).toFixed(1)} t</b> ({Math.round(usedKg / cap.kg * 100)}%)</span>
+            {price && <span>Goods value: <b>{fmtUSD(fit * (parseInt(rolls) || 0) * (parseFloat(price) || 0))}</b></span>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 // ─── SEARCHABLE SKU PICKER (module-level → no focus loss) ─────────────────────
 // Multi-keyword search: every space-separated term must match the item's text.
 const skuHaystack = (s) => [s.sku_code, s.description, s.category, s.brand, s.backing_material,
@@ -62,7 +112,7 @@ const SkuPicker = ({ skus, value, onSelect }) => {
 };
 
 // ─── ORDER FORM MODAL ─────────────────────────────────────────────────────────
-const BLANK_ITEM = { _sku_id: "", item_name: "", thickness: "", size: "", liner_color: "", qty_ctn: "", total_ctn: "", total_roll: "", unit_price: "", kg_pkg: "", code: "", shipping_mark: "", marking: "", cbm: "" };
+const BLANK_ITEM = { _sku_id: "", item_name: "", brand: "", thickness: "", size: "", liner_color: "", qty_ctn: "", total_ctn: "", total_roll: "", unit_price: "", price_per_sqm: "", kg_pkg: "", code: "", shipping_mark: "", marking: "", notes: "", cbm: "" };
 const DOC_CHECKLIST_ITEMS = ["Bill of Lading","Commercial Invoice","Packing List","Certificate of Origin","Insurance Certificate","Customs Declaration"];
 const PRIORITIES = ["normal","high","urgent","low"];
 
@@ -103,7 +153,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
   };
   const [items, setItems] = useState(
     order?.items?.length
-      ? order.items.map(i => ({ _sku_id: "", item_name: i.item_name || "", thickness: i.thickness || "", size: i.size || "", liner_color: i.liner_color || "", qty_ctn: i.qty_ctn || "", total_ctn: i.total_ctn || "", total_roll: i.total_roll || "", unit_price: i.unit_price || "", kg_pkg: i.kg_pkg || "", code: i.code || "", shipping_mark: i.shipping_mark || "", marking: i.marking || "", cbm: i.cbm || "" }))
+      ? order.items.map(i => ({ _sku_id: "", item_name: i.item_name || "", brand: i.brand || "", thickness: i.thickness || "", size: i.size || "", liner_color: i.liner_color || "", qty_ctn: i.qty_ctn || "", total_ctn: i.total_ctn || "", total_roll: i.total_roll || "", unit_price: i.unit_price || "", price_per_sqm: i.price_per_sqm || "", kg_pkg: i.kg_pkg || "", code: i.code || "", shipping_mark: i.shipping_mark || "", marking: i.marking || "", notes: i.notes || "", cbm: i.cbm || "" }))
       : [{ ...BLANK_ITEM }, { ...BLANK_ITEM }]
   );
   const [saving, setSaving] = useState(false);
@@ -156,6 +206,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
         ...r,
         _sku_id:       skuId,
         item_name:     sku.description  || sku.sku_code || r.item_name,
+        brand:         sku.brand        || r.brand,
         thickness:     sku.thickness    || r.thickness,
         size:          sku.size         || r.size,
         liner_color:   sku.liner_color  || sku.color || r.liner_color,
@@ -314,6 +365,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                 <thead>
                   <tr>
                     <TH w={185}>Item</TH>
+                    <TH w={90}>Brand</TH>
                     <TH w={65}>Thickness</TH>
                     <TH w={115}>Size</TH>
                     <TH w={90}>Liner/Color</TH>
@@ -328,6 +380,8 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                     <TH w={125}>Code</TH>
                     <TH w={90}>Marking</TH>
                     <TH w={155}>Shipping Mark</TH>
+                    <TH w={85}>$/SQM</TH>
+                    <TH w={150}>Item Notes</TH>
                     <TH w={36}></TH>
                   </tr>
                 </thead>
@@ -352,6 +406,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                               style={{ ...inp, fontSize: 11, color: "#374151" }} />
                           </div>
                         </TD>
+                        <TD>{ci("brand", "text", "STUK")}</TD>
                         <TD>{ci("thickness", "text", "0.9MM")}</TD>
                         <TD>{ci("size", "text", "1000MM×50M")}</TD>
                         <TD>{ci("liner_color", "text", "YELLOW")}</TD>
@@ -374,15 +429,17 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                         <TD>{ci("code", "text", "IS-57145V-1.0YL")}</TD>
                         <TD>{ci("marking", "text", "1MM")}</TD>
                         <TD>{ci("shipping_mark", "text", "INSULATION…")}</TD>
+                        <TD>{ci("price_per_sqm", "number", "0.00")}</TD>
+                        <TD>{ci("notes", "text", "note…")}</TD>
                         <TD>
-                          <button type="button" onClick={() => delRow(idx)} style={{ background: "#fef2f2", border: "none", borderRadius: 4, cursor: "pointer", color: "#dc2626", fontSize: 14, padding: "2px 6px", fontWeight: 700 }}>×</button>
+                          <button type="button" onClick={() => delRow(idx)} aria-label="Remove line item" title="Remove line item" style={{ background: "#fef2f2", border: "none", borderRadius: 4, cursor: "pointer", color: "#dc2626", fontSize: 16, padding: "4px 9px", fontWeight: 700, minHeight: 30 }}>×</button>
                         </TD>
                       </tr>
                     );
                   })}
                   {/* Totals row */}
                   <tr style={{ background: "#1e3a5f" }}>
-                    <td colSpan={4} style={{ padding: "8px 10px", color: "#fff", fontWeight: 700, fontSize: 12, border: "1px solid #2d4f7f" }}>TOTALS</td>
+                    <td colSpan={5} style={{ padding: "8px 10px", color: "#fff", fontWeight: 700, fontSize: 12, border: "1px solid #2d4f7f" }}>TOTALS</td>
                     <td style={{ border: "1px solid #2d4f7f" }}></td>
                     <td style={{ padding: "8px 6px", color: "#fbbf24", fontWeight: 800, fontSize: 13, textAlign: "right", border: "1px solid #2d4f7f" }}>{totalCtn.toLocaleString()}</td>
                     <td style={{ padding: "8px 6px", color: "#fbbf24", fontWeight: 800, fontSize: 13, textAlign: "right", border: "1px solid #2d4f7f" }}>{totalRoll.toLocaleString()}</td>
@@ -391,7 +448,7 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
                     <td style={{ padding: "8px 6px", border: "1px solid #2d4f7f" }}></td>
                     <td style={{ padding: "8px 6px", color: "#34d399", fontWeight: 800, fontSize: 13, textAlign: "right", border: "1px solid #2d4f7f" }}>{totalKg.toLocaleString()}</td>
                     <td style={{ padding: "8px 6px", color: "#34d399", fontWeight: 800, fontSize: 13, textAlign: "right", border: "1px solid #2d4f7f" }}>{totalCbm.toFixed(2)}</td>
-                    <td colSpan={4} style={{ border: "1px solid #2d4f7f" }}></td>
+                    <td colSpan={6} style={{ border: "1px solid #2d4f7f" }}></td>
                   </tr>
                 </tbody>
               </table>
@@ -511,6 +568,7 @@ const ImportOrders = () => {
   const [filter, setFilter]         = useState("All");
   const [view, setView]             = useState("list");   // "list" | "supplier"
   const [selected, setSelected]     = useState(null);    // full order with items
+  const [showPlanner, setShowPlanner] = useState(false);
   const [orders, setOrders]         = useState([]);
   const [supplierSummary, setSupplierSummary] = useState([]);
   const [suppliers, setSuppliers]   = useState([]);
@@ -673,6 +731,7 @@ const ImportOrders = () => {
 
   return (
     <div style={{ padding: 24, overflowY: "auto", flex: 1 }}>
+      {showPlanner && <LoadPlanner onClose={() => setShowPlanner(false)} />}
       {(showForm || editOrder) && (
         <OrderForm order={editOrder} suppliers={suppliers} skus={skus} onSave={handleSave} onClose={() => { setShowForm(false); setEditOrder(null); }} />
       )}
@@ -710,7 +769,8 @@ const ImportOrders = () => {
                 style={{ padding: "6px 12px", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 12, fontWeight: view === v ? 600 : 400, background: view === v ? "#fff" : "transparent", color: view === v ? "#1d4ed8" : "#64748b" }}>{label}</button>
             ))}
           </div>
-          <button onClick={exportOrders} style={{ padding: "8px 12px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 12, color: "#374151", fontWeight: 500 }}>📥 Export CSV</button>
+          <button onClick={() => setShowPlanner(true)} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 12, color: "#374151", fontWeight: 500 }}><Ic n="kanban" size={14} /> Load Planner</button>
+          <button onClick={exportOrders} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "8px 12px", background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, cursor: "pointer", fontSize: 12, color: "#374151", fontWeight: 500 }}><Ic n="download" size={14} /> Export CSV</button>
           <button onClick={() => { setShowForm(true); setEditOrder(null); }} style={{ padding: "8px 14px", background: "#3b82f6", border: "none", borderRadius: 8, cursor: "pointer", fontSize: 13, color: "#fff", fontWeight: 600 }}>+ New Order</button>
         </div>
       </div>
@@ -965,7 +1025,7 @@ const ImportOrders = () => {
                               <td style={{ padding: "8px 12px" }}>
                                 <div style={{ display: "flex", gap: 4 }}>
                                   <button onClick={e => { e.stopPropagation(); openEdit(o); }} style={{ padding: "3px 7px", background: "#f1f5f9", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11 }}>Edit</button>
-                                  <button title="Print PO" onClick={e => { e.stopPropagation(); printPO(o.id); }} style={{ padding: "3px 7px", background: "#eff6ff", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#1d4ed8" }}>🖨</button>
+                                  <button title="Print PO" onClick={e => { e.stopPropagation(); printPO(o.id); }} aria-label="Print PO" style={{ display: "inline-flex", padding: "5px 8px", background: "#eff6ff", border: "none", borderRadius: 5, cursor: "pointer", color: "#1d4ed8" }}><Ic n="printer" size={14} /></button>
                                   <button title="Duplicate" onClick={e => { e.stopPropagation(); handleDuplicate(o.id); }} style={{ padding: "3px 7px", background: "#f5f3ff", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#7c3aed" }}>⧉</button>
                                   <button onClick={e => { e.stopPropagation(); handleDelete(o.id); }} style={{ padding: "3px 7px", background: "#fef2f2", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#dc2626" }}>Del</button>
                                 </div>
@@ -983,7 +1043,7 @@ const ImportOrders = () => {
             {selected && (
               <div style={{ marginTop: 16, background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", padding: 20 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                  <span style={{ fontWeight: 700, fontSize: 14 }}>📦 {selected.po_number} — {selected.supplier}</span>
+                  <span style={{ fontWeight: 700, fontSize: 14, display: "inline-flex", alignItems: "center", gap: 6 }}><Ic n="orders" size={15} /> {selected.po_number} — {selected.supplier}</span>
                   <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#64748b" }}>×</button>
                 </div>
                 {(selected.items || []).length > 0 && (
@@ -1050,12 +1110,12 @@ const ImportOrders = () => {
                   <button onClick={() => { const l = pickList(); if (l) printOrderList(l); }}
                     title="One row per order (register)"
                     style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid #1d4ed8", background: "#eff6ff", color: "#1d4ed8", cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
-                    🖨 List {n ? `(${n})` : "(All)"}
+                    <Ic n="printer" size={14} /> List {n ? `(${n})` : "(All)"}
                   </button>
                   <button onClick={() => { const l = pickList(); if (l) printOrdersDetailed(l); }}
                     title="Summary + full line items & totals per order"
                     style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid #1d4ed8", background: "#1d4ed8", color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
-                    🖨 Details {n ? `(${n})` : "(All)"}
+                    <Ic n="printer" size={14} /> Details {n ? `(${n})` : "(All)"}
                   </button>
                 </div>
               );
@@ -1118,7 +1178,7 @@ const ImportOrders = () => {
                         <td style={{ padding: "10px 14px" }}>
                           <div style={{ display: "flex", gap: 4 }}>
                             <button onClick={e => { e.stopPropagation(); openEdit(o); }} style={{ padding: "4px 8px", background: "#f1f5f9", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11 }}>Edit</button>
-                            <button title="Print PO" onClick={e => { e.stopPropagation(); printPO(o.id); }} style={{ padding: "4px 8px", background: "#eff6ff", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#1d4ed8" }}>🖨</button>
+                            <button title="Print PO" onClick={e => { e.stopPropagation(); printPO(o.id); }} aria-label="Print PO" style={{ display: "inline-flex", padding: "5px 8px", background: "#eff6ff", border: "none", borderRadius: 5, cursor: "pointer", color: "#1d4ed8" }}><Ic n="printer" size={14} /></button>
                             <button title="Duplicate" onClick={e => { e.stopPropagation(); handleDuplicate(o.id); }} style={{ padding: "4px 8px", background: "#f5f3ff", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#7c3aed" }}>⧉</button>
                             <button title="Bulk copies" onClick={e => { e.stopPropagation(); handleBulk(o.id); }} style={{ padding: "4px 8px", background: "#fffbeb", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#b45309" }}>⧉×N</button>
                             <button onClick={e => { e.stopPropagation(); handleDelete(o.id); }} style={{ padding: "4px 8px", background: "#fef2f2", border: "none", borderRadius: 5, cursor: "pointer", fontSize: 11, color: "#dc2626" }}>Del</button>
@@ -1138,7 +1198,7 @@ const ImportOrders = () => {
           {selected && (
             <div style={{ marginTop: 16, background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", padding: 20 }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>📦 {selected.po_number} — {selected.supplier}
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Ic n="orders" size={15} /> {selected.po_number} — {selected.supplier}
                   {selected.marking && <span style={{ fontWeight: 400, color: "#64748b", marginLeft: 8, fontSize: 12 }}>({selected.marking})</span>}
                   {selected.shipped   && <span style={{ marginLeft: 8, fontSize: 10, background: "#eff6ff", color: "#1d4ed8", padding: "2px 7px", borderRadius: 20, fontWeight: 600, border: "1px solid #bfdbfe" }}>🚢 SHIPPED</span>}
                   {selected.delivered && <span style={{ marginLeft: 6, fontSize: 10, background: "#f0fdf4", color: "#059669", padding: "2px 7px", borderRadius: 20, fontWeight: 600, border: "1px solid #bbf7d0" }}>✅ DELIVERED</span>}
@@ -1149,7 +1209,7 @@ const ImportOrders = () => {
                       style={{ padding: "5px 10px", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1d4ed8", textDecoration: "none", fontWeight: 600 }}>🚢 Track Live</a>
                   )}
                   <button onClick={() => printPO(selected.id)}
-                    style={{ padding: "5px 10px", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1d4ed8", cursor: "pointer", fontWeight: 600 }}>🖨 Print PO</button>
+                    style={{ padding: "5px 10px", background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1d4ed8", cursor: "pointer", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 6 }}><Ic n="printer" size={14} /> Print PO</button>
                   <button onClick={() => setTrackForm({ orderId: selected.id, event: "", location: "", note: "" })}
                     style={{ padding: "5px 10px", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, fontSize: 12, color: "#15803d", cursor: "pointer", fontWeight: 600 }}>+ Tracking</button>
                   <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#64748b", fontSize: 18 }}>×</button>
@@ -1321,4 +1381,4 @@ const ImportOrders = () => {
   );
 };
 
-export { ImportOrders, DOC_CHECKLIST_ITEMS };
+export { ImportOrders, DOC_CHECKLIST_ITEMS, OrderForm };
