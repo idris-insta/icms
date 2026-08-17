@@ -64,6 +64,24 @@ router.get('/skus/template', protect, (req, res) => {
 // Normalize a header to a lookup key: lowercase, strip non-alphanumerics.
 const hkey = (h) => String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+/**
+ * Which of `codes` already exist, as a Set.
+ *
+ * The import summary needs to tell the user how many rows were added versus
+ * refreshed. It cannot be inferred from affectedRows on an upsert: MariaDB
+ * reports 1 for an insert, 2 for a changed row and 0 for an unchanged one, and
+ * under found-rows semantics an update also reports 1 — indistinguishable from
+ * an insert. One lookup up front is both cheaper and correct.
+ */
+async function existingCodes(table, column, codes) {
+  const list = [...new Set(codes.filter(Boolean))];
+  if (!list.length) return new Set();
+  const marks = list.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await db.query(
+    `SELECT ${column} AS code FROM ${table} WHERE ${column} IN (${marks})`, list);
+  return new Set(rows.map(r => String(r.code)));
+}
+
 // Maps a raw CSV row (any supported header style) to canonical SKU fields.
 // Accepts both the export template headers AND the business item-master headers
 // (Item Code, Item Group, Width (MM), Length (MTR), QTY/PKG, Adhesive Type,
@@ -112,11 +130,13 @@ router.post('/skus/bulk', protect, authorize('owner', 'manager'), uploadMem.sing
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
-  for (const raw of rows) {
-    const r = mapSkuRow(raw);
+  const mapped = rows.map(mapSkuRow);
+  const already = await existingCodes('skus', 'sku_code', mapped.map(r => r.sku_code));
+  for (const r of mapped) {
     if (!r.sku_code) { errors.push(`Row skipped — missing item/sku code`); continue; }
+    const isNew = !already.has(String(r.sku_code));
     try {
-      const result = await db.query(`
+      await db.query(`
         INSERT INTO skus (sku_code, description, hsn_code, category, thickness, size, color, liner_color, roll_weight, item_code, shipping_marks, weight_per_unit, cbm_per_unit,
           brand, uom, qty_per_pkg, adhesive_type, backing_material, width_mm, length_mtr, density)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
@@ -142,14 +162,13 @@ router.post('/skus/bulk', protect, authorize('owner', 'manager'), uploadMem.sing
           length_mtr     = EXCLUDED.length_mtr,
           density        = EXCLUDED.density,
           updated_at     = NOW()
-        RETURNING (xmax = 0) AS inserted
       `, [r.sku_code, r.description||null, r.hsn_code, r.category,
           r.thickness, r.size, r.color, r.liner_color,
           r.roll_weight, r.item_code, r.shipping_marks,
           r.weight_per_unit, r.cbm_per_unit,
           r.brand, r.uom, r.qty_per_pkg, r.adhesive_type, r.backing_material,
           r.width_mm, r.length_mtr, r.density]);
-      result.rows[0].inserted ? inserted++ : updated++;
+      isNew ? inserted++ : updated++;
     } catch (e) { errors.push(`${r.sku_code}: ${e.message}`); }
   }
   res.json({ inserted, updated, errors, total: rows.length });
@@ -160,7 +179,7 @@ router.get('/skus', protect, async (req, res) => {
   const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit) || 100));
   const offset = (page - 1) * limit;
   try {
-    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM skus');
+    const { rows: countRows } = await db.query('SELECT COUNT(*) AS count FROM skus');
     const total = parseInt(countRows[0].count);
     const { rows } = await db.query('SELECT * FROM skus ORDER BY sku_code LIMIT $1 OFFSET $2', [limit, offset]);
     res.json({ skus: rows, total, page, limit, pages: Math.ceil(total / limit) });
@@ -257,10 +276,12 @@ router.post('/suppliers/bulk', protect, authorize('owner', 'manager'), uploadMem
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
+  const already = await existingCodes('suppliers', 'code', rows.map(r => r.code));
   for (const r of rows) {
     if (!r.code || !r.name) { errors.push(`Row skipped — missing code or name`); continue; }
+    const isNew = !already.has(String(r.code));
     try {
-      const result = await db.query(`
+      await db.query(`
         INSERT INTO suppliers (code, name, country, base_currency, contact_email, contact_phone, payment_terms_days, port, city)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (code) DO UPDATE SET
@@ -273,12 +294,11 @@ router.post('/suppliers/bulk', protect, authorize('owner', 'manager'), uploadMem
           port               = EXCLUDED.port,
           city               = EXCLUDED.city,
           updated_at         = NOW()
-        RETURNING (xmax = 0) AS inserted
       `, [r.code, r.name, r.country||null, r.base_currency||'USD',
           r.contact_email||null, r.contact_phone||null,
           parseInt(r.payment_terms_days)>=0 ? parseInt(r.payment_terms_days) : 30,
           r.port||null, r.city||null]);
-      result.rows[0].inserted ? inserted++ : updated++;
+      isNew ? inserted++ : updated++;
     } catch (e) { errors.push(`${r.code}: ${e.message}`); }
   }
   res.json({ inserted, updated, errors, total: rows.length });
@@ -289,7 +309,7 @@ router.get('/suppliers', protect, async (req, res) => {
   const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit) || 100));
   const offset = (page - 1) * limit;
   try {
-    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM suppliers');
+    const { rows: countRows } = await db.query('SELECT COUNT(*) AS count FROM suppliers');
     const total = parseInt(countRows[0].count);
     const { rows } = await db.query('SELECT * FROM suppliers ORDER BY name LIMIT $1 OFFSET $2', [limit, offset]);
     res.json({ suppliers: rows, total, page, limit, pages: Math.ceil(total / limit) });
@@ -375,19 +395,20 @@ router.post('/ports/bulk', protect, authorize('owner', 'manager'), uploadMem.sin
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const { rows } = parseCSV(req.file.buffer);
   let inserted = 0, updated = 0, errors = [];
+  const already = await existingCodes('ports', 'code', rows.map(r => r.code));
   for (const r of rows) {
     if (!r.code || !r.name) { errors.push(`Row skipped — missing code or name`); continue; }
+    const isNew = !already.has(String(r.code));
     try {
-      const result = await db.query(`
+      await db.query(`
         INSERT INTO ports (code, name, country, port_type)
         VALUES ($1,$2,$3,$4)
         ON CONFLICT (code) DO UPDATE SET
           name      = EXCLUDED.name,
           country   = EXCLUDED.country,
           port_type = EXCLUDED.port_type
-        RETURNING (xmax = 0) AS inserted
       `, [r.code, r.name, r.country||null, r.port_type||'both']);
-      result.rows[0].inserted ? inserted++ : updated++;
+      isNew ? inserted++ : updated++;
     } catch (e) { errors.push(`${r.code}: ${e.message}`); }
   }
   res.json({ inserted, updated, errors, total: rows.length });
@@ -398,7 +419,7 @@ router.get('/ports', protect, async (req, res) => {
   const limit = Math.min(5000, Math.max(1, parseInt(req.query.limit) || 100));
   const offset = (page - 1) * limit;
   try {
-    const { rows: countRows } = await db.query('SELECT COUNT(*) FROM ports');
+    const { rows: countRows } = await db.query('SELECT COUNT(*) AS count FROM ports');
     const total = parseInt(countRows[0].count);
     const { rows } = await db.query('SELECT * FROM ports ORDER BY name LIMIT $1 OFFSET $2', [limit, offset]);
     res.json({ ports: rows, total, page, limit, pages: Math.ceil(total / limit) });

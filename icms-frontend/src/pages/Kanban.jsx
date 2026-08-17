@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { apiFetch, apiUpload, useToast, fmtUSD, fmtINR, KANBAN_COL_COLOR, Spinner, Err, Ic } from "../lib/core";
+import { useMasters } from "../store/masters";
 import { OrderForm } from "./Orders";
 
 // ─── TRANSITION PROMPT RULES ──────────────────────────────────────────────────
@@ -309,7 +310,13 @@ const TransitionModal = ({ order, toCol, onClose, onDone }) => {
 // ─── DETAIL MODAL (summary + Edit) ────────────────────────────────────────────
 const DetailModal = ({ id, onClose, onEdit }) => {
   const [o, setO] = useState(null);
-  useEffect(() => { apiFetch(`/orders/${id}`).then(setO).catch(() => {}); }, [id]);
+  useEffect(() => {
+    // Ignore a response that arrives after the user has opened a different card.
+    let current = true;
+    setO(null);
+    apiFetch(`/orders/${id}`).then(r => { if (current) setO(r); }).catch(() => {});
+    return () => { current = false; };
+  }, [id]);
   if (!o) return null;
   const d = (x) => x ? String(x).slice(0, 10) : "—";
   const row = (k, v) => (
@@ -378,11 +385,21 @@ const Kanban = () => {
   const dragCard = useRef(null);
   const cols = ["Draft", "Confirmed", "Loaded", "Shipped", "In Transit", "Arrived", "Delivered", "Paid"];
 
+  // A reload can be triggered while an earlier one is still in flight (drop a
+  // card, then drop another). Each run takes a ticket and only the newest one
+  // is allowed to write state, so a slow earlier response cannot repaint the
+  // board with pre-move data.
+  const loadSeq = useRef(0);
   const loadGroups = useCallback(() => {
-    apiFetch("/orders/kanban").then(setGroups).catch(e => setError(e.message)).finally(() => setLoading(false));
-    apiFetch("/orders/forecast").then(setForecast).catch(() => {});
-    apiFetch("/costing/fx-drift").then(setFxDrift).catch(() => {});
-    apiFetch("/financial/cashflow-forecast").then(setCashflow).catch(() => {});
+    const ticket = ++loadSeq.current;
+    const fresh = () => ticket === loadSeq.current;
+    apiFetch("/orders/kanban")
+      .then(g => { if (fresh()) setGroups(g); })
+      .catch(e => { if (fresh()) setError(e.message); })
+      .finally(() => { if (fresh()) setLoading(false); });
+    apiFetch("/orders/forecast").then(r => fresh() && setForecast(r)).catch(() => {});
+    apiFetch("/costing/fx-drift").then(r => fresh() && setFxDrift(r)).catch(() => {});
+    apiFetch("/financial/cashflow-forecast").then(r => fresh() && setCashflow(r)).catch(() => {});
   }, []);
   useEffect(() => { loadGroups(); }, [loadGroups]);
 
@@ -399,12 +416,12 @@ const Kanban = () => {
   const openEdit = async (order) => {
     setDetailId(null);
     try {
-      const [sup, sk, full] = await Promise.all([
-        apiFetch("/masters/suppliers"),
-        apiFetch("/masters/skus?limit=5000"),
-        apiFetch(`/orders/${order.id}`),
-      ]);
-      setEditCtx({ order: full, suppliers: sup.suppliers || [], skus: sk.skus || [] });
+      // Suppliers and SKUs come from the shared cache instead of being refetched
+      // (5000 SKUs) every time a card is opened for editing.
+      await useMasters.getState().ensureLoaded();
+      const { suppliers, skus } = useMasters.getState();
+      const full = await apiFetch(`/orders/${order.id}`);
+      setEditCtx({ order: full, suppliers, skus });
     } catch (e) { setError(e.message); }
   };
 

@@ -12,16 +12,16 @@ router.get('/insights', protect, async (req, res) => {
                   COUNT(*)::int AS orders, COALESCE(SUM(total_value),0)::float AS value
                 FROM import_orders WHERE COALESCE(etd, created_at) >= CURRENT_DATE - INTERVAL '12 months'
                 GROUP BY 1 ORDER BY 1`),
-      db.query(`SELECT AVG(delivered_date - etd) FILTER (WHERE delivered_date IS NOT NULL AND etd IS NOT NULL)::float AS avg_lead,
+      db.query(`SELECT AVG(DATEDIFF(delivered_date, etd)) FILTER (WHERE delivered_date IS NOT NULL AND etd IS NOT NULL)::float AS avg_lead,
                   COUNT(*) FILTER (WHERE delivered_date IS NOT NULL AND eta IS NOT NULL)::int AS measurable,
                   COUNT(*) FILTER (WHERE delivered_date IS NOT NULL AND eta IS NOT NULL AND delivered_date <= eta)::int AS on_time
                 FROM import_orders`),
       db.query(`SELECT o.id, o.po_number, s.name AS supplier FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
                 WHERE o.status IN ('Shipped','In Transit','Arrived','Customs Clearance','Cleared')
-                  AND (o.doc_checklist IS NULL OR NOT (o.doc_checklist ? 'Bill of Lading')
-                       OR (o.doc_checklist->>'Bill of Lading')='false') LIMIT 50`),
+                  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(o.doc_checklist, '$."Bill of Lading"')), 'false')
+                      IN ('false','null') LIMIT 50`),
       db.query(`SELECT o.id, o.po_number, s.name AS supplier, o.status,
-                  (CURRENT_DATE - COALESCE(o.status_changed_at, o.updated_at)::date) AS days
+                  DATEDIFF(CURRENT_DATE, COALESCE(o.status_changed_at, o.updated_at)) AS days
                 FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
                 WHERE o.status NOT IN ('Delivered','Paid','Draft')
                   AND COALESCE(o.status_changed_at, o.updated_at) < CURRENT_DATE - INTERVAL '14 days'
@@ -34,7 +34,7 @@ router.get('/insights', protect, async (req, res) => {
       db.query(`SELECT o.id, o.po_number, s.name AS supplier, o.eta, COALESCE(o.free_days,7) AS free_days
                 FROM import_orders o JOIN suppliers s ON o.supplier_id=s.id
                 WHERE o.status IN ('Arrived','Customs Clearance','Cleared') AND o.eta IS NOT NULL
-                  AND (o.eta + (COALESCE(o.free_days,7) || ' days')::interval) <= CURRENT_DATE + INTERVAL '5 days' LIMIT 50`),
+                  AND DATE_ADD(o.eta, INTERVAL COALESCE(o.free_days,7) DAY) <= CURRENT_DATE + INTERVAL '5 days' LIMIT 50`),
     ]);
     const lt = lead.rows[0] || {};
     res.json({
@@ -139,13 +139,13 @@ router.get('/financial', protect, async (req, res) => {
           COALESCE(p_agg.total_paid,   0)               AS total_paid,
           COALESCE(o_agg.total_value,  0) - COALESCE(p_agg.total_paid, 0) AS balance
         FROM suppliers s
-        LEFT JOIN LATERAL (
-          SELECT COUNT(id) AS total_orders, COALESCE(SUM(total_value), 0) AS total_value
-          FROM import_orders WHERE supplier_id = s.id
-        ) o_agg ON true
-        LEFT JOIN LATERAL (
-          SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
-        ) p_agg ON true
+        LEFT JOIN (
+          SELECT supplier_id, COUNT(id) AS total_orders, COALESCE(SUM(total_value), 0) AS total_value
+          FROM import_orders GROUP BY supplier_id
+        ) o_agg ON o_agg.supplier_id = s.id
+        LEFT JOIN (
+          SELECT supplier_id, COALESCE(SUM(amount), 0) AS total_paid FROM payments GROUP BY supplier_id
+        ) p_agg ON p_agg.supplier_id = s.id
         WHERE s.is_active = true
           AND COALESCE(o_agg.total_value, 0) - COALESCE(p_agg.total_paid, 0) > 0
         ORDER BY balance DESC

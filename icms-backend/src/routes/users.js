@@ -67,6 +67,9 @@ router.put('/:id', protect, ownerOnly, async (req, res) => {
     `, [email ? email.toLowerCase().trim() : null, name ? name.trim() : null,
         role || null, typeof is_active === 'boolean' ? is_active : null, id]);
     if (!rows[0]) return res.status(404).json({ error: 'User not found' });
+    // Drop the cached role so the change applies to their next request rather
+    // than after the auth cache expires.
+    protect.invalidateUser(id);
     res.json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'A user with that email already exists' });
@@ -104,6 +107,7 @@ router.delete('/:id', protect, ownerOnly, async (req, res) => {
       if (owners <= 1) return res.status(400).json({ error: 'Cannot delete the last active owner' });
     }
     await db.query('DELETE FROM users WHERE id=$1', [id]);
+    protect.invalidateUser(id);
     res.json({ ok: true });
   } catch (err) {
     if (err.code === '23503') return res.status(409).json({ error: 'User has linked records (e.g. uploaded documents). Deactivate instead.' });

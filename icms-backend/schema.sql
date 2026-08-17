@@ -162,7 +162,7 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order  ON order_items(order_id);
 
 -- Default owner user (password: owner123)
 INSERT INTO users (email, password_hash, name, role) VALUES
-  ('owner@icms.com', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Owner', 'owner')
+  ('owner@icms.com', '$2a$10$kkD4aMrmMaQEOcGbUHPSMeBdcYTIlnWZBZMXRnPLgBKUUKRX9NQmm', 'Owner', 'owner')
 ON CONFLICT (email) DO NOTHING;
 
 -- Suppliers

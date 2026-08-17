@@ -84,7 +84,7 @@ router.get('/scan-status', protect, async (req, res) => {
   try {
     const { rows } = await db.query("SELECT key, value FROM settings WHERE key LIKE 'ai_%'");
     const s = {}; rows.forEach(r => { s[r.key] = r.value; });
-    const url = (s.ai_ollama_url || 'http://localhost:11434').replace(/\/$/, '');
+    const url = (s.ai_ollama_url || process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/$/, '');
     let models = [];
     try {
       const r = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2500) });

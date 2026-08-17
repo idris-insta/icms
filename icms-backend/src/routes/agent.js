@@ -10,7 +10,7 @@ async function aiConfig() {
   return {
     provider,
     model: s.ai_model || process.env.ANTHROPIC_MODEL || (provider === 'ollama' ? 'llama3.1' : 'claude-sonnet-4-6'),
-    ollamaUrl: (s.ai_ollama_url || 'http://localhost:11434').replace(/\/$/, ''),
+    ollamaUrl: (s.ai_ollama_url || process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/$/, ''),
     anthropicKey: s.ai_anthropic_key || process.env.ANTHROPIC_API_KEY || '',
   };
 }
@@ -23,18 +23,40 @@ async function callLLM(system, user, maxTokens = 1500) {
     e.status = 503; throw e;
   }
   if (cfg.provider === 'ollama') {
+    // A local model on CPU can take minutes for the first answer while weights
+    // load. Without an explicit deadline the request hangs indefinitely and the
+    // UI just spins, so bound it and say which failure happened.
+    const timeoutMs = parseInt(process.env.AI_TIMEOUT_MS || '180000', 10);
     let resp;
     try {
       resp = await fetch(`${cfg.ollamaUrl}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
+        signal: AbortSignal.timeout(timeoutMs),
         body: JSON.stringify({
           model: cfg.model, stream: false,
+          // Reasoning models (qwen3, deepseek-r1, …) think before answering,
+          // which on CPU dominates everything else: with a realistic prompt,
+          // qwen3:8b took 363s with thinking on and 5.4s with it off, for the
+          // same one-line answer. These questions are summarisation over
+          // figures the database already aggregated, so the reasoning budget
+          // buys almost nothing. Set AI_THINK=true to re-enable.
+          think: process.env.AI_THINK === 'true',
+          // Ollama evicts an idle model after 5 minutes, and reloading a 5 GB
+          // model costs 14-16s on this class of machine — paid by whoever asks
+          // the next question. Users ask intermittently, so keep it resident.
+          keep_alive: process.env.AI_KEEP_ALIVE || '30m',
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
         }),
       });
     } catch (err) {
-      const e = new Error(`Cannot reach Ollama at ${cfg.ollamaUrl}. Is it running? (ollama serve)`);
-      e.status = 502; throw e;
+      const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+      const e = new Error(timedOut
+        ? `The model did not answer within ${Math.round(timeoutMs / 1000)}s. `
+          + `"${cfg.model}" may be too large for this machine — try a smaller model in Settings → AI, `
+          + `or raise AI_TIMEOUT_MS.`
+        : `Cannot reach Ollama at ${cfg.ollamaUrl}. Is it running? (ollama serve)`);
+      e.status = timedOut ? 504 : 502;
+      throw e;
     }
     if (!resp.ok) {
       const e = new Error(`Ollama error ${resp.status} — is the model pulled? (ollama pull ${cfg.model})`);

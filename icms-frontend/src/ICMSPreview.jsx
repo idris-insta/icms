@@ -1,5 +1,7 @@
-import { useState, useEffect } from "react";
-import { apiFetch, ToastProvider, Sidebar, Header } from "./lib/core";
+import { useEffect } from "react";
+import { ToastProvider, Sidebar, Header } from "./lib/core";
+import { useAuth } from "./store/auth";
+import { useUI } from "./store/ui";
 import { Dashboard }   from "./pages/Dashboard";
 import { ImportOrders } from "./pages/Orders";
 import { Costing }     from "./pages/Costing";
@@ -15,35 +17,28 @@ import { Settings }    from "./pages/SettingsPage";
 import { Login }       from "./pages/Login";
 
 export default function App() {
-  const [user, setUser]         = useState(null);
-  const [page, setPage]         = useState("dashboard");
-  const [ready, setReady]       = useState(false);
-  const [alertCount, setAlertCount] = useState(0);
+  const user   = useAuth(s => s.user);
+  const ready  = useAuth(s => s.ready);
+  const hydrate = useAuth(s => s.hydrate);
+  const logout = useAuth(s => s.logout);
 
-  useEffect(() => {
-    const token = localStorage.getItem("icms_token");
-    if (token) {
-      apiFetch("/auth/me").then(u => setUser(u)).catch(() => localStorage.removeItem("icms_token")).finally(() => setReady(true));
-    } else {
-      setReady(true);
-    }
-  }, []);
+  const page       = useUI(s => s.page);
+  const setPage    = useUI(s => s.setPage);
+  const alertCount = useUI(s => s.alertCount);
+  const applyTheme = useUI(s => s.applyTheme);
 
-  // Poll due alerts every 5 min to keep bell badge fresh
+  useEffect(() => { applyTheme(); hydrate(); }, [applyTheme, hydrate]);
+
+  // Keep the bell badge fresh while signed in.
   useEffect(() => {
     if (!user) return;
-    const fetch = () => apiFetch("/alerts").then(r => {
-      setAlertCount((r.counts?.critical || 0) + (r.counts?.warning || 0));
-    }).catch(() => {});
-    fetch();
-    const t = setInterval(fetch, 5 * 60 * 1000);
-    return () => clearInterval(t);
+    const { startAlertPolling, stopAlertPolling } = useUI.getState();
+    startAlertPolling();
+    return stopAlertPolling;
   }, [user]);
 
   if (!ready) return <ToastProvider><div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontFamily: "system-ui" }}>Loading…</div></ToastProvider>;
-  if (!user)  return <ToastProvider><Login onLogin={(u) => { setUser(u); setPage("dashboard"); }} /></ToastProvider>;
-
-  const logout = () => { localStorage.removeItem("icms_token"); setUser(null); };
+  if (!user)  return <ToastProvider><Login onLogin={(u) => { useAuth.getState().setUser(u); setPage("dashboard"); }} /></ToastProvider>;
 
   const PAGE = {
     dashboard: <Dashboard />,

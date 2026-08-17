@@ -5,15 +5,32 @@ const path    = require('path');
 
 const app = express();
 
-const allowedOrigins = process.env.CORS_ORIGINS
-  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
-  : ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:4173'];
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-    cb(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
+// Behind nginx / a load balancer, req.ip must come from X-Forwarded-For or the
+// login rate limiter would bucket every user under the proxy's address.
+if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : process.env.TRUST_PROXY);
+
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',').map(o => o.trim()).filter(Boolean);
+const DEV_ORIGINS = ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:4173'];
+
+/**
+ * A request is same-origin when its Origin header matches the Host it was sent
+ * to. In production the SPA is served by this very process, so its own origin
+ * is never in CORS_ORIGINS — without this check the app would reject its own
+ * asset requests with 403 and render a blank page.
+ */
+function isSameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;                 // curl, server-to-server, <script> loads
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
+
+app.use(cors((req, cb) => {
+  const origin = req.headers.origin;
+  const list = allowedOrigins.length ? allowedOrigins : DEV_ORIGINS;
+  const ok = isSameOrigin(req) || (origin && list.includes(origin));
+  if (ok) return cb(null, { origin: true, credentials: true });
+  cb(new Error('Not allowed by CORS'));
 }));
 app.use(express.json());
 
@@ -33,21 +50,39 @@ app.use('/api/alerts',    require('./routes/alerts'));
 app.use('/api/schedules', require('./routes/schedules'));
 app.use('/api/analytics', require('./routes/analytics'));
 
-// ── Health check (also tests DB) ──────────────────────────────────────────────
-const protect = require('./middleware/auth');
-app.get('/api/health', protect, async (req, res) => {
+// ── Health check ──────────────────────────────────────────────────────────────
+// Unauthenticated on purpose: Docker/compose and any load balancer need to
+// probe it before a token exists. It reveals only up/down, never data.
+app.get('/api/health', async (req, res) => {
   const db = require('./db');
   try {
-    await db.query('SELECT 1');
-    res.json({ status: 'ok', db: 'connected', ts: new Date() });
+    await db.ping();
+    res.json({ status: 'ok', db: 'connected', client: db.CLIENT, ts: new Date() });
   } catch (err) {
-    console.error('[health]', err);
+    console.error('[health]', err.message);
     res.status(503).json({ status: 'degraded', db: 'disconnected', ts: new Date() });
   }
 });
 
+// ── Static frontend ───────────────────────────────────────────────────────────
+// In the container the built SPA is copied next to the API and served from the
+// same origin, which also means no CORS configuration is needed in production.
+const fs = require('fs');
+const STATIC_DIR = process.env.STATIC_DIR || path.join(__dirname, '..', 'public');
+const hasStatic = fs.existsSync(path.join(STATIC_DIR, 'index.html'));
+if (hasStatic) {
+  app.use(express.static(STATIC_DIR));
+  console.log(`Serving frontend from ${STATIC_DIR}`);
+}
+
 // ── 404 ───────────────────────────────────────────────────────────────────────
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+app.use((req, res) => {
+  // Unknown /api paths are genuine 404s; anything else is a client-side route.
+  if (!req.path.startsWith('/api/') && hasStatic) {
+    return res.sendFile(path.join(STATIC_DIR, 'index.html'));
+  }
+  res.status(404).json({ error: 'Not found' });
+});
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

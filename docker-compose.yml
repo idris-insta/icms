@@ -1,0 +1,79 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: icms-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE:      ${DB_NAME:-icms}
+      MARIADB_USER:          ${DB_USER:-icms_user}
+      MARIADB_PASSWORD:      ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_general_ci
+      --max-connections=200
+      --transaction-isolation=READ-COMMITTED
+    volumes:
+      - db_data:/var/lib/mysql
+    # Not published to the host by default — only the app container needs it.
+    # Uncomment to connect an external SQL client:
+    # ports:
+    #   - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [icms]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: icms:latest
+    container_name: icms-app
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      NODE_ENV:    production
+      PORT:        "3001"
+      DB_CLIENT:   mysql
+      DB_HOST:     mariadb
+      DB_PORT:     "3306"
+      DB_NAME:     ${DB_NAME:-icms}
+      DB_USER:     ${DB_USER:-icms_user}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      JWT_SECRET:  ${JWT_SECRET:?set JWT_SECRET in .env}
+      # Frontend and API share an origin in this setup, so CORS stays empty
+      # unless you serve the SPA from somewhere else.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY:  ${TRUST_PROXY:-true}
+      UPLOAD_DIR:   /app/uploads
+      # Ollama powers the AI agent and OCR field extraction. Inside a container
+      # "localhost" is the container itself, so this must point at the host.
+      # The host's Ollama has to listen on more than 127.0.0.1 for this to work:
+      #   OLLAMA_HOST=0.0.0.0 ollama serve
+      # A value saved in Settings → AI overrides this.
+      OLLAMA_URL:   ${OLLAMA_URL:-http://host.docker.internal:11434}
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "${APP_PORT:-8080}:3001"
+    # Lets the one-shot PostgreSQL migration reach a database running on the
+    # host as `host.docker.internal`. That host PostgreSQL must be listening on
+    # more than 127.0.0.1 (listen_addresses + pg_hba) for the container to
+    # connect; otherwise point PG_URL at its LAN address instead.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [icms]
+
+volumes:
+  db_data:
+  uploads:
+
+networks:
+  icms:
+    driver: bridge

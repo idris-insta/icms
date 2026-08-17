@@ -20,7 +20,7 @@ async function aiConfig() {
     provider:     s.ai_provider || (process.env.ANTHROPIC_API_KEY ? 'anthropic' : 'none'),
     model:        s.ai_model || process.env.ANTHROPIC_MODEL || 'llama3.1',
     visionModel:  s.ai_vision_model || 'llama3.2-vision',
-    ollamaUrl:    (s.ai_ollama_url || 'http://localhost:11434').replace(/\/$/, ''),
+    ollamaUrl:    (s.ai_ollama_url || process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/$/, ''),
     anthropicKey: s.ai_anthropic_key || process.env.ANTHROPIC_API_KEY || '',
   };
 }
@@ -240,7 +240,10 @@ ${text.slice(0, 8000)}`;
       const r = await fetch(`${cfg.ollamaUrl}/api/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         signal: AbortSignal.timeout(120000),
+        // Reasoning wastes minutes here for no benefit — this is extraction
+        // into a fixed JSON shape, not analysis. See the note in routes/agent.js.
         body: JSON.stringify({ model: cfg.model, stream: false, format: 'json',
+          think: process.env.AI_THINK === 'true',
           messages: [{ role: 'user', content: prompt }] }),
       });
       if (!r.ok) return null;

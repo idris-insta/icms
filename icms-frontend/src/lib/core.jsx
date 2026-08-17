@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext, useMemo } from "react";
+import { useUI } from "../store/ui";
 import { LayoutDashboard, Package, LayoutGrid, Wallet, Calculator, CalendarDays, TrendingUp, Database, FileText, BarChart3, Settings as SettingsIcon, Ship, LogOut, Bell, CheckCircle2, XCircle, AlertTriangle, Info, Printer, List, Factory, Receipt, DollarSign, RefreshCw, Download, Upload, Users, Lock, Building2, ClipboardList, Plus, Pencil, KeyRound, Search, Trash2, X, ChevronDown, Moon, Sun } from "lucide-react";
 
 // ─── ICON HELPER (SVG via lucide — replaces emoji icons) ──────────────────────
@@ -16,7 +17,11 @@ const ICONS = {
 const Ic = ({ n, size = 16, ...p }) => { const C = ICONS[n] || Package; return <C size={size} strokeWidth={2} aria-hidden="true" {...p} />; };
 
 // ─── API CLIENT ───────────────────────────────────────────────────────────────
-const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:3001") + "/api";
+// In production the SPA is served by the API itself, so requests go to the same
+// origin and the base is just "/api". VITE_API_URL only needs setting when the
+// two are on different hosts (the dev server, or a separately-hosted frontend).
+const API_BASE = (import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:3001" : "")) + "/api";
 
 const apiFetch = async (path, options = {}) => {
   const token = localStorage.getItem("icms_token");
@@ -37,7 +42,7 @@ const apiFetch = async (path, options = {}) => {
     } catch (_) {}
     // Map common DB error strings to friendlier messages
     if (msg.includes("ECONNREFUSED") || msg.includes("connect") || msg.includes("Connection terminated")) {
-      msg = "Database unavailable — please start Docker / PostgreSQL.";
+      msg = "Database unavailable — the MariaDB server is not reachable.";
     }
     throw new Error(msg || "Request failed");
   }
@@ -248,14 +253,11 @@ const Sidebar = ({ active, setActive, user, onLogout }) => (
   </div>
 );
 
-// Dark mode toggle — smart-invert theme, persisted in localStorage
+// Dark mode toggle — smart-invert theme. State lives in the UI store so the
+// button, the <html> class and localStorage can never drift apart.
 const ThemeToggle = () => {
-  const [dark, setDark] = useState(() => typeof document !== "undefined" && document.documentElement.classList.contains("dark-invert"));
-  const toggle = () => {
-    const next = !dark; setDark(next);
-    document.documentElement.classList.toggle("dark-invert", next);
-    localStorage.setItem("icms_theme", next ? "dark" : "light");
-  };
+  const dark = useUI(s => s.dark);
+  const toggle = useUI(s => s.toggleDark);
   return (
     <button onClick={toggle} title="Toggle dark mode" aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
       style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#475569" }}>

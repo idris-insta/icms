@@ -22,13 +22,15 @@ function plannedDates(s) {
   return out;
 }
 
+// Must run inside a transaction — see the identical helper in routes/orders.js.
+// The supplier row is locked FOR UPDATE so concurrent allocations serialise.
 async function nextPoNumber(client, supplierId) {
-  const { rows: sup } = await client.query('SELECT code FROM suppliers WHERE id = $1', [supplierId]);
+  const { rows: sup } = await client.query('SELECT code FROM suppliers WHERE id = $1 FOR UPDATE', [supplierId]);
   if (!sup[0]) throw new Error('Supplier not found');
   const yr = String(new Date().getFullYear()).slice(-2);
   const { rows } = await client.query(`
-    SELECT COALESCE(MAX(CASE WHEN po_number ~ '^.+ [0-9]{3}[0-9]{2}$'
-      THEN CAST(substring(po_number FROM '.+ ([0-9]{3})[0-9]{2}$') AS INT) ELSE 0 END), 0) AS max_seq
+    SELECT COALESCE(MAX(CASE WHEN po_number REGEXP '^.+ [0-9]{5}$'
+      THEN CAST(LEFT(RIGHT(po_number, 5), 3) AS UNSIGNED) ELSE 0 END), 0) AS max_seq
     FROM import_orders WHERE supplier_id = $1`, [supplierId]);
   const seq = String((parseInt(rows[0].max_seq) || 0) + 1).padStart(3, '0');
   return `${sup[0].code} ${seq}${yr}`;
@@ -153,15 +155,16 @@ router.delete('/:id', protect, authorize('owner', 'manager'), async (req, res) =
 
 // POST /api/schedules/:id/generate — turn the next pending shipment into a Draft order
 router.post('/:id/generate', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
-  const client = await db.pool.connect();
   try {
-    await client.query('BEGIN');
+    // The whole allocate-and-generate must be atomic: the schedule row is locked
+    // FOR UPDATE so two clicks cannot both claim the same pending shipment.
+    const out = await db.tx(async (client) => {
     const { rows: sr } = await client.query('SELECT * FROM order_schedules WHERE id = $1 FOR UPDATE', [req.params.id]);
     const s = sr[0];
-    if (!s) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Schedule not found' }); }
+    if (!s) { const e = new Error('Schedule not found'); e.status = 404; throw e; }
     const planned = plannedDates(s);
     const next = planned.find(p => !p.generated);
-    if (!next) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Schedule fully generated' }); }
+    if (!next) { const e = new Error('Schedule fully generated'); e.status = 400; throw e; }
     const po = await nextPoNumber(client, s.supplier_id);
     const { rows: ord } = await client.query(`
       INSERT INTO import_orders (po_number, supplier_id, container_type, currency, status, marking, etd, notes, schedule_id, priority)
@@ -176,13 +179,14 @@ router.post('/:id/generate', protect, authorize('owner', 'manager', 'staff'), as
       `, [ord[0].id, s.qty_per_shipment, s.sku_id]).catch(() => {});
     }
     await client.query('UPDATE order_schedules SET generated_count = generated_count + 1, updated_at = NOW() WHERE id = $1', [s.id]);
-    await client.query('COMMIT');
-    res.status(201).json({ order_id: ord[0].id, po_number: ord[0].po_number, shipment: next.seq });
+    return { order_id: ord[0].id, po_number: ord[0].po_number, shipment: next.seq };
+    });
+    res.status(201).json(out);
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('[schedules/generate]', err);
     res.status(500).json({ error: 'Internal server error' });
-  } finally { client.release(); }
+  }
 });
 
 module.exports = router;

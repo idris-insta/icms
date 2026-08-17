@@ -6,30 +6,63 @@ const authorize = require('../middleware/authorize');
 
 // All costing figures are USD-based. INR conversion uses the supplier ex_rate.
 
-// Fetch the live USD→INR rate (cached 1h to avoid hammering upstream)
+// Fetch the live USD→INR rate (cached 1h to avoid hammering upstream).
+// The upstream is a free service that occasionally rate-limits or times out;
+// a stale cached rate is kept indefinitely so a blip upstream cannot take the
+// costing pages down with it.
+const FX_TTL_MS = 3600_000;
 let _fxCache = null;
-async function fetchLiveRate() {
-  if (_fxCache && Date.now() - _fxCache.fetchedAt < 3600_000) return _fxCache;
-  const data = await new Promise((resolve, reject) => {
-    https.get('https://open.er-api.com/v6/latest/USD', r => {
+
+function fetchUpstreamRate() {
+  return new Promise((resolve, reject) => {
+    const req = https.get('https://open.er-api.com/v6/latest/USD', r => {
+      if (r.statusCode !== 200) {
+        r.resume();
+        return reject(new Error(`upstream returned HTTP ${r.statusCode}`));
+      }
       let b = ''; r.on('data', c => b += c);
       r.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(8000, () => req.destroy(new Error('upstream timed out')));
   });
-  const rate = data && data.rates && data.rates.INR;
-  if (!rate) throw new Error('Live rate unavailable');
-  _fxCache = { rate: round4(rate), date: data.time_last_update_utc || null, fetchedAt: Date.now() };
-  return _fxCache;
+}
+
+async function fetchLiveRate() {
+  if (_fxCache && Date.now() - _fxCache.fetchedAt < FX_TTL_MS) return _fxCache;
+  try {
+    const data = await fetchUpstreamRate();
+    const rate = data && data.rates && data.rates.INR;
+    if (!rate) throw new Error('Live rate unavailable');
+    _fxCache = { rate: round4(rate), date: data.time_last_update_utc || null, fetchedAt: Date.now(), stale: false };
+    return _fxCache;
+  } catch (err) {
+    // Serve the last known rate rather than failing the request outright.
+    if (_fxCache) {
+      console.warn('[fx-rate] upstream failed, serving stale rate:', err.message);
+      return { ..._fxCache, stale: true };
+    }
+    throw err;
+  }
 }
 
 // GET /api/costing/fx-rate — live USD→INR (no API key required)
 router.get('/fx-rate', protect, async (req, res) => {
+  const cached = !!(_fxCache && Date.now() - _fxCache.fetchedAt < FX_TTL_MS);
   try {
-    const cached = !!(_fxCache && Date.now() - _fxCache.fetchedAt < 3600_000);
     const fx = await fetchLiveRate();
-    res.json({ rate: fx.rate, date: fx.date, source: 'open.er-api.com', cached });
+    res.json({ rate: fx.rate, date: fx.date, source: 'open.er-api.com', cached, stale: !!fx.stale });
   } catch (err) {
+    // Nothing cached and upstream is down — fall back to the configured rate so
+    // the UI still has a sensible default to prefill.
     console.error('[fx-rate]', err.message);
+    try {
+      const { rows } = await db.query("SELECT value FROM settings WHERE key = 'default_usd_rate'");
+      const fallback = parseFloat(rows[0] && rows[0].value);
+      if (Number.isFinite(fallback) && fallback > 0) {
+        return res.json({ rate: fallback, date: null, source: 'settings.default_usd_rate', cached: false, stale: true });
+      }
+    } catch (_) { /* settings lookup is best-effort */ }
     res.status(502).json({ error: 'Failed to fetch live rate' });
   }
 });
@@ -286,7 +319,11 @@ router.get('/price-list', protect, async (req, res) => {
     let supFilter = '';
     if (supplier_id) { params.push(parseInt(supplier_id)); supFilter = `AND o.supplier_id = $${params.length}`; }
     const { rows } = await db.query(`
-      SELECT DISTINCT ON (o.supplier_id, oi.item_name, oi.thickness, oi.size)
+      SELECT * FROM (
+      SELECT ROW_NUMBER() OVER (
+               PARTITION BY o.supplier_id, oi.item_name, oi.thickness, oi.size
+               ORDER BY o.created_at DESC, o.id DESC
+             ) AS rn,
              s.id AS supplier_id, s.code AS supplier_code, s.name AS supplier,
              COALESCE(o.usd_rate, s.ex_rate, 84)::float       AS usd_rate,
              COALESCE(o.duty_rate, s.duty_percent, 10)::float AS duty_percent,
@@ -305,7 +342,9 @@ router.get('/price-list', protect, async (req, res) => {
       JOIN import_orders o ON oi.order_id = o.id
       JOIN suppliers s     ON o.supplier_id = s.id
       WHERE oi.item_name <> '' AND oi.unit_price > 0 ${supFilter}
-      ORDER BY o.supplier_id, oi.item_name, oi.thickness, oi.size, o.created_at DESC
+      ) ranked
+      WHERE rn = 1
+      ORDER BY supplier_id, item_name, thickness, size
     `, params);
     const price_list = rows.map(r => {
       // Full landed, same method as container-wise: the roll inherits its latest order's

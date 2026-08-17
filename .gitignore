@@ -37,3 +37,9 @@ Thumbs.db
 
 # ── Claude internal ───────────────────────────────────────────────────────────
 .claude/
+
+# ── Deployment artefacts ──────────────────────────────────────────────────────
+backups/
+
+# Export archives
+*.zip

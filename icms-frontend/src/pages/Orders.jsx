@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } from "react";
 import { apiFetch, apiUpload, apiDownload, useToast, useConfirm, exportCSV, fmtINR, fmtUSD, fmtCur, STATUS_STYLE, KANBAN_COL_COLOR, STATUSES, CONTAINER_TYPES, CURRENCIES, PRIORITY_COLOR, PRIORITY_BG, Badge, PriorityBadge, BarChart, Progress, Spinner, Err, KPICard, TH, TD, Ic } from "../lib/core";
 import { printPO, printOrderList, printOrdersDetailed } from "../lib/print";
+import { useOrders } from "../store/orders";
+import { useMasters } from "../store/masters";
 
 // ─── CONTAINER LOAD PLANNER ───────────────────────────────────────────────────
 const CONTAINER_CAP = { "20FT": { cbm: 33, kg: 28000 }, "40FT": { cbm: 67, kg: 26500 }, "40HC": { cbm: 76, kg: 26500 }, "40HQ": { cbm: 76, kg: 26500 } };
@@ -252,11 +254,15 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
         doc_checklist:  form.doc_checklist || {},
         items: validItems,
       };
-      const result = isEdit
-        ? await apiFetch(`/orders/${order.id}`, { method: "PUT",  body: JSON.stringify(payload) })
-        : await apiFetch("/orders",               { method: "POST", body: JSON.stringify(payload) });
+      // The store attaches `if_unmodified_since` on edits so a concurrent save
+      // by another user is rejected instead of silently overwritten.
+      const result = await useOrders.getState().save(payload, isEdit ? order : null);
       onSave(result);
-    } catch (err) { setError(err.message); }
+    } catch (err) {
+      setError(err.conflict
+        ? "This order was changed by someone else while you were editing. Close and reopen it to see their changes."
+        : err.message);
+    }
     finally { setSaving(false); }
   };
 
@@ -564,17 +570,34 @@ const OrderForm = ({ order, suppliers, skus = [], onSave, onClose }) => {
 
 // ─── IMPORT ORDERS ────────────────────────────────────────────────────────────
 const ImportOrders = () => {
-  const [search, setSearch]         = useState("");
-  const [filter, setFilter]         = useState("All");
+  // List data, filters and the open order live in the orders store; reference
+  // data lives in the masters store. Both survive page switches and de-duplicate
+  // concurrent fetches.
+  const orders          = useOrders(s => s.orders);
+  const supplierSummary = useOrders(s => s.supplierSummary);
+  const selected        = useOrders(s => s.selected);
+  const loading         = useOrders(s => s.loading);
+  const error           = useOrders(s => s.error);
+  const search          = useOrders(s => s.search);
+  const filter          = useOrders(s => s.filter);
+  const setSearch       = useOrders(s => s.setSearch);
+  const setFilter       = useOrders(s => s.setFilter);
+  const setError        = useOrders(s => s.setError);
+  const load            = useOrders(s => s.load);
+
+  const suppliers = useMasters(s => s.suppliers);
+  const skus      = useMasters(s => s.skus);
+
+  const setSelected = useCallback((v) => useOrders.setState(s => ({
+    selected: typeof v === "function" ? v(s.selected) : v,
+  })), []);
+  const setOrders = useCallback((v) => useOrders.setState(s => ({
+    orders: typeof v === "function" ? v(s.orders) : v,
+  })), []);
+  const setSupplierSummary = useCallback((v) => useOrders.setState({ supplierSummary: v }), []);
+
   const [view, setView]             = useState("list");   // "list" | "supplier"
-  const [selected, setSelected]     = useState(null);    // full order with items
   const [showPlanner, setShowPlanner] = useState(false);
-  const [orders, setOrders]         = useState([]);
-  const [supplierSummary, setSupplierSummary] = useState([]);
-  const [suppliers, setSuppliers]   = useState([]);
-  const [skus, setSkus]             = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [error, setError]           = useState("");
   const [showForm, setShowForm]     = useState(false);
   const [editOrder, setEditOrder]   = useState(null);
   const [selectedSupplier, setSelectedSupplier] = useState(null);
@@ -586,32 +609,7 @@ const ImportOrders = () => {
   const toast = useToast();
   const statusFilters = ["All", ...STATUSES.slice(0, 7)];
 
-  const load = useCallback(async () => {
-    setLoading(true); setError("");
-    try {
-      const params = new URLSearchParams();
-      if (filter !== "All") params.set("status", filter);
-      if (search) params.set("search", search);
-      const [oRes, sRes, skuRes, supSumRes] = await Promise.all([
-        apiFetch(`/orders?${params}`),
-        apiFetch("/masters/suppliers"),
-        apiFetch("/masters/skus?limit=5000"),
-        apiFetch("/orders/supplier-summary"),
-      ]);
-      setOrders(oRes.orders || []); setSuppliers(sRes.suppliers || []); setSkus(skuRes.skus || []);
-      setSupplierSummary(supSumRes.suppliers || []);
-    } catch (e) { setError(e.message); }
-    finally { setLoading(false); }
-  }, [filter, search]);
-
-  // Fetch full order (with items) and set as selected
-  const selectOrder = async (o) => {
-    if (selected?.id === o.id) { setSelected(null); return; }
-    try {
-      const full = await apiFetch(`/orders/${o.id}`);
-      setSelected(full);
-    } catch { setSelected(o); }
-  };
+  const selectOrder = useOrders(s => s.select);
 
   // Toggle expand for supplier-view order rows
   const toggleExpand = async (orderId) => {
@@ -648,23 +646,23 @@ const ImportOrders = () => {
     } catch { setEditOrder(o); }
   };
 
-  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+  // Reference data is fetched once for the whole app, not per keystroke.
+  useEffect(() => { useMasters.getState().ensureLoaded(); }, []);
+  // Debounce the list refetch; the store discards any response that a newer
+  // request has already superseded.
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load, filter, search]);
 
   const handleDelete = async (id) => {
     if (!confirm("Delete this order?")) return;
-    try { await apiFetch(`/orders/${id}`, { method: "DELETE" }); setOrders(o => o.filter(x => x.id !== id)); setSelected(null); toast("Order deleted", "warn"); }
+    try { await useOrders.getState().remove(id); toast("Order deleted", "warn"); }
     catch (e) { setError(e.message); }
   };
 
   const handleSave = (saved) => {
-    setOrders(prev => {
-      const exists = prev.find(o => o.id === saved.id);
-      return exists ? prev.map(o => o.id === saved.id ? saved : o) : [saved, ...prev];
-    });
+    // The store already merged `saved` into the list and the open selection.
     setShowForm(false); setEditOrder(null);
     toast(`Order ${saved.po_number} saved`, "success");
-    // Refresh supplier summary counts
-    apiFetch("/orders/supplier-summary").then(r => setSupplierSummary(r.suppliers || [])).catch(() => {});
+    useOrders.getState().refreshSupplierSummary();
   };
 
   // Duplicate one order as a new Draft (new PO number, items copied)

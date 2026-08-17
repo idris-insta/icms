@@ -110,9 +110,9 @@ router.get('/supplier-accounts', protect, async (req, res) => {
              COALESCE(p_agg.total_paid, 0)            AS total_paid
       FROM suppliers s
       LEFT JOIN import_orders o ON o.supplier_id = s.id
-      LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
-      ) p_agg ON true
+      LEFT JOIN (
+        SELECT supplier_id, COALESCE(SUM(amount), 0) AS total_paid FROM payments GROUP BY supplier_id
+      ) p_agg ON p_agg.supplier_id = s.id
       GROUP BY s.id, s.name, s.code, s.base_currency, s.payment_terms_days, p_agg.total_paid
       ORDER BY total_invoiced DESC NULLS LAST
     `);
@@ -170,10 +170,10 @@ router.get('/due-alerts', protect, async (req, res) => {
              o.total_value - COALESCE(p.paid, 0) AS balance,
              CASE
                WHEN o.payment_due_date < CURRENT_DATE THEN 'overdue'
-               WHEN o.payment_due_date <= CURRENT_DATE + 7 THEN 'due_soon'
+               WHEN o.payment_due_date <= CURRENT_DATE + INTERVAL '7 days' THEN 'due_soon'
                ELSE 'upcoming'
              END AS alert_type,
-             (o.payment_due_date - CURRENT_DATE) AS days_remaining
+             DATEDIFF(o.payment_due_date, CURRENT_DATE) AS days_remaining
       FROM import_orders o
       JOIN suppliers s ON o.supplier_id = s.id
       LEFT JOIN (

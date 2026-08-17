@@ -90,7 +90,7 @@ router.get('/', protect, async (req, res) => {
 
     const countParams = [...params];
     const { rows: countRows } = await db.query(
-      `SELECT COUNT(*) FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id ${clause}`,
+      `SELECT COUNT(*) AS count FROM import_orders o JOIN suppliers s ON o.supplier_id = s.id ${clause}`,
       countParams
     );
     const total = parseInt(countRows[0].count);
@@ -213,9 +213,9 @@ router.get('/supplier-summary', protect, async (req, res) => {
         p_agg.paid                                AS total_paid
       FROM suppliers s
       LEFT JOIN import_orders o ON o.supplier_id = s.id
-      LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE supplier_id = s.id
-      ) p_agg ON true
+      LEFT JOIN (
+        SELECT supplier_id, COALESCE(SUM(amount), 0) AS paid FROM payments GROUP BY supplier_id
+      ) p_agg ON p_agg.supplier_id = s.id
       GROUP BY s.id, s.code, s.name, s.base_currency,
                s.port, s.avg_value_usd, s.ex_rate, s.duty_percent, s.expense_inr, s.target_per_month,
                p_agg.paid
@@ -251,8 +251,8 @@ router.get('/next-po-number', protect, async (req, res) => {
 
     const { rows } = await db.query(`
       SELECT COALESCE(MAX(
-        CASE WHEN po_number ~ '^.+ [0-9]{3}[0-9]{2}$'
-        THEN CAST(substring(po_number FROM '.+ ([0-9]{3})[0-9]{2}$') AS INT)
+        CASE WHEN po_number REGEXP '^.+ [0-9]{5}$'
+        THEN CAST(LEFT(RIGHT(po_number, 5), 3) AS UNSIGNED)
         ELSE 0 END
       ), 0) AS max_seq
       FROM import_orders WHERE supplier_id = $1
@@ -267,15 +267,18 @@ router.get('/next-po-number', protect, async (req, res) => {
   }
 });
 
-// Generate the next PO number for a supplier (shared by duplicate/bulk)
+// Generate the next PO number for a supplier (shared by duplicate/bulk).
+// Must be called inside a transaction: the supplier row is locked FOR UPDATE so
+// two concurrent allocations for the same supplier cannot read the same MAX(seq)
+// and mint duplicate PO numbers.
 async function nextPoNumber(client, supplierId) {
-  const { rows: supRows } = await client.query('SELECT code FROM suppliers WHERE id = $1', [supplierId]);
+  const { rows: supRows } = await client.query('SELECT code FROM suppliers WHERE id = $1 FOR UPDATE', [supplierId]);
   if (!supRows[0]) throw new Error('Supplier not found');
   const yr = String(new Date().getFullYear()).slice(-2);
   const { rows } = await client.query(`
     SELECT COALESCE(MAX(
-      CASE WHEN po_number ~ '^.+ [0-9]{3}[0-9]{2}$'
-      THEN CAST(substring(po_number FROM '.+ ([0-9]{3})[0-9]{2}$') AS INT)
+      CASE WHEN po_number REGEXP '^.+ [0-9]{5}$'
+      THEN CAST(LEFT(RIGHT(po_number, 5), 3) AS UNSIGNED)
       ELSE 0 END
     ), 0) AS max_seq
     FROM import_orders WHERE supplier_id = $1
@@ -319,20 +322,16 @@ async function copyOrder(client, sourceId, opts = {}) {
 
 // POST /api/orders/:id/duplicate — copy an order as a new Draft (staff+)
 router.post('/:id/duplicate', protect, authorize('owner', 'manager', 'staff'), async (req, res) => {
-  const client = await db.pool.connect();
   try {
-    await client.query('BEGIN');
-    const created = await copyOrder(client, req.params.id);
-    if (!created) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Order not found' }); }
-    await client.query('COMMIT');
+    const created = await db.tx(client => copyOrder(client, req.params.id));
+    if (!created) return res.status(404).json({ error: 'Order not found' });
     const { rows } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [created.id]);
     const { rows: items } = await db.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [created.id]);
     res.status(201).json({ ...rows[0], items });
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('[orders/duplicate]', err);
     res.status(500).json({ error: 'Internal server error' });
-  } finally { client.release(); }
+  }
 });
 
 // POST /api/orders/bulk — bulk-create orders (staff+)
@@ -348,24 +347,24 @@ router.post('/bulk', protect, authorize('owner', 'manager', 'staff'), async (req
   if (!source_order_id) return res.status(400).json({ error: 'source_order_id required' });
   const batch_id = 'B' + Date.now().toString(36).toUpperCase();
   const base = start_date ? new Date(start_date) : null;
-  const client = await db.pool.connect();
   try {
-    await client.query('BEGIN');
-    const created = [];
-    for (let i = 0; i < n; i++) {
-      let etd = null;
-      if (base && iv >= 0) { const d = new Date(base); d.setDate(d.getDate() + i * iv); etd = d.toISOString().split('T')[0]; }
-      const c = await copyOrder(client, source_order_id, { etd, batch_id });
-      if (!c) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Order not found' }); }
-      created.push(c);
-    }
-    await client.query('COMMIT');
+    const created = await db.tx(async (client) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        let etd = null;
+        if (base && iv >= 0) { const d = new Date(base); d.setDate(d.getDate() + i * iv); etd = d.toISOString().split('T')[0]; }
+        const c = await copyOrder(client, source_order_id, { etd, batch_id });
+        if (!c) { const e = new Error('Order not found'); e.status = 404; throw e; }
+        out.push(c);
+      }
+      return out;
+    });
     res.status(201).json({ created, count: created.length, batch_id });
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (err.status === 404) return res.status(404).json({ error: 'Order not found' });
     console.error('[orders/bulk]', err);
     res.status(500).json({ error: 'Internal server error' });
-  } finally { client.release(); }
+  }
 });
 
 // GET /api/orders/:id  (includes items)
@@ -392,11 +391,12 @@ router.post('/:id/tracking', protect, authorize('owner', 'manager', 'staff'), as
     const entry = { ts: new Date().toISOString(), location: location || '', event, note: note || '' };
     const { rows } = await db.query(`
       UPDATE import_orders
-      SET tracking_updates = COALESCE(tracking_updates, '[]'::jsonb) || $1::jsonb,
+      SET tracking_updates = JSON_ARRAY_APPEND(
+            COALESCE(NULLIF(tracking_updates, ''), '[]'), '$', JSON_EXTRACT($1, '$')),
           updated_at = NOW()
       WHERE id = $2
       RETURNING tracking_updates
-    `, [JSON.stringify([entry]), req.params.id]);
+    `, [JSON.stringify(entry), req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
     res.json({ tracking_updates: rows[0].tracking_updates });
   } catch (err) {
@@ -427,10 +427,9 @@ router.post('/', protect, authorize('owner', 'manager', 'staff'), async (req, re
     }
   }
 
-  const client = await db.pool.connect();
   try {
-    await client.query('BEGIN');
-    const { rows } = await client.query(`
+    const newId = await db.tx(async (client) => {
+      const { rows } = await client.query(`
       INSERT INTO import_orders
         (po_number, supplier_id, container_type, currency, status, marking,
          total_quantity, total_weight, total_cbm, total_value, utilization_percentage,
@@ -444,17 +443,17 @@ router.post('/', protect, authorize('owner', 'manager', 'staff'), async (req, re
         shipment_date || null, dueDateVal, notes || null,
         freight_cost || 0, insurance_cost || 0, duty_rate || 0, free_days || 7, demurrage_rate || 0,
         container_returned_date || null, doc_checklist ? JSON.stringify(doc_checklist) : '{}', priority || 'normal']);
-    if (items.length) await saveItems(client, rows[0].id, items);
-    await client.query('COMMIT');
-    const { rows: order } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [rows[0].id]);
-    const { rows: savedItems } = await db.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [rows[0].id]);
+      if (items.length) await saveItems(client, rows[0].id, items);
+      return rows[0].id;
+    });
+    const { rows: order } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [newId]);
+    const { rows: savedItems } = await db.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [newId]);
     res.status(201).json({ ...order[0], items: savedItems });
   } catch (err) {
-    await client.query('ROLLBACK');
     if (err.code === '23505') return res.status(409).json({ error: 'PO number already exists' });
     console.error('[orders/create]', err);
     res.status(500).json({ error: 'Internal server error' });
-  } finally { client.release(); }
+  }
 });
 
 // ── Excel / CSV import of historical orders ────────────────────────────────────
@@ -536,11 +535,10 @@ router.post('/import', protect, authorize('owner', 'manager', 'staff'), uploadMe
     }
   });
 
-  const client = await db.pool.connect();
-  let created = 0;
   try {
-    await client.query('BEGIN');
-    for (const g of groups.values()) {
+    const created = await db.tx(async (client) => {
+      let n = 0;
+      for (const g of groups.values()) {
       const po = g.po_number || await nextPoNumber(client, g.supplier_id);
       const t = calcTotals(g.items);
       const { rows: ins } = await client.query(`
@@ -553,15 +551,15 @@ router.post('/import', protect, authorize('owner', 'manager', 'staff'), uploadMe
           t.total_quantity, t.total_weight, t.total_cbm, t.total_value]);
       if (!ins[0]) { errors.push(`PO "${po}" already exists — skipped`); continue; }
       if (g.items.length) await saveItems(client, ins[0].id, g.items);
-      created++;
-    }
-    await client.query('COMMIT');
+      n++;
+      }
+      return n;
+    });
     res.json({ created, groups: groups.size, errors });
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('[orders/import]', err);
     res.status(500).json({ error: 'Import failed: ' + err.message, errors });
-  } finally { client.release(); }
+  }
 });
 
 // PUT /api/orders/:id — update (staff+)
@@ -573,7 +571,8 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
           freight_cost, insurance_cost, duty_rate, free_days, demurrage_rate,
           container_returned_date, doc_checklist, priority,
           cha_charges, extra_charges, usd_rate,
-          loading_date, delivered_date, usd_rate_delivery } = req.body;
+          loading_date, delivered_date, usd_rate_delivery,
+          if_unmodified_since } = req.body;
 
   const totals = (items && items.length) ? calcTotals(items) : { total_quantity, total_weight, total_cbm, total_value };
 
@@ -594,10 +593,21 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
     }
   }
 
-  const client = await db.pool.connect();
   try {
-    await client.query('BEGIN');
-    await client.query(`
+    const conflict = await db.tx(async (client) => {
+      // Lock the row first: the read-modify-write below (and saveItems, which
+      // deletes and re-inserts the item rows) must not interleave with another
+      // edit of the same order.
+      const { rows: cur } = await client.query(
+        'SELECT updated_at FROM import_orders WHERE id = $1 FOR UPDATE', [req.params.id]);
+      if (!cur[0]) { const e = new Error('not found'); e.status = 404; throw e; }
+      // Optimistic concurrency: if the client sent the version it loaded and the
+      // row has moved on since, reject rather than silently discarding the other
+      // user's edit.
+      if (if_unmodified_since && new Date(if_unmodified_since).getTime() !== new Date(cur[0].updated_at).getTime()) {
+        return true;
+      }
+      await client.query(`
       UPDATE import_orders SET
         supplier_id            = COALESCE($1,  supplier_id),
         container_type         = COALESCE($2,  container_type),
@@ -645,17 +655,24 @@ router.put('/:id', protect, authorize('owner', 'manager', 'staff'), async (req, 
         dueDateProvided,
         dnull(cha_charges), dnull(extra_charges), dnull(usd_rate),
         dnull(loading_date), dnull(delivered_date), dnull(usd_rate_delivery)]);
-    if (items) await saveItems(client, req.params.id, items);
-    await client.query('COMMIT');
+      if (items) await saveItems(client, req.params.id, items);
+      return false;
+    });
+    if (conflict) {
+      return res.status(409).json({
+        error: 'This order was changed by someone else. Reload before saving.',
+        code: 'STALE_WRITE',
+      });
+    }
     const { rows } = await db.query(`${ORDER_SELECT} WHERE o.id = $1`, [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Order not found' });
     const { rows: savedItems } = await db.query('SELECT * FROM order_items WHERE order_id = $1 ORDER BY id', [req.params.id]);
     res.json({ ...rows[0], items: savedItems });
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (err.status === 404) return res.status(404).json({ error: 'Order not found' });
     console.error('[orders/update]', err);
     res.status(500).json({ error: 'Internal server error' });
-  } finally { client.release(); }
+  }
 });
 
 // PATCH /api/orders/:id/status — staff+

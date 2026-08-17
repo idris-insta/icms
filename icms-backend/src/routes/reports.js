@@ -15,19 +15,19 @@ router.get('/supplier-summary', protect, async (req, res) => {
         COALESCE(o_agg.delivered_value,  0)       AS delivered_value,
         COALESCE(o_agg.total_value,      0) - COALESCE(p_agg.total_paid, 0) AS balance_due
       FROM suppliers s
-      LEFT JOIN LATERAL (
-        SELECT
+      LEFT JOIN (
+        SELECT supplier_id,
           COUNT(*) FILTER (WHERE status NOT IN ('Shipped','In Transit','Arrived','Delivered')) AS pending_pos,
           COALESCE(SUM(total_value) FILTER (WHERE status NOT IN ('Shipped','In Transit','Arrived','Delivered')), 0) AS pending_value,
           COUNT(*) FILTER (WHERE status IN ('Shipped','In Transit'))                            AS shipped_pos,
           COALESCE(SUM(total_value) FILTER (WHERE status IN ('Shipped','In Transit')), 0)       AS shipped_value,
           COALESCE(SUM(total_value) FILTER (WHERE status = 'Delivered'), 0)                     AS delivered_value,
           COALESCE(SUM(total_value), 0)                                                         AS total_value
-        FROM import_orders WHERE supplier_id = s.id
-      ) o_agg ON true
-      LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(amount), 0) AS total_paid FROM payments WHERE supplier_id = s.id
-      ) p_agg ON true
+        FROM import_orders GROUP BY supplier_id
+      ) o_agg ON o_agg.supplier_id = s.id
+      LEFT JOIN (
+        SELECT supplier_id, COALESCE(SUM(amount), 0) AS total_paid FROM payments GROUP BY supplier_id
+      ) p_agg ON p_agg.supplier_id = s.id
       WHERE s.is_active = true
       ORDER BY s.name
     `);
