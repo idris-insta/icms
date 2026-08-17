@@ -38,6 +38,8 @@ fi
 
 echo
 echo "Wrote: $OUT"
-du -h "$OUT" | cut -f1 | sed 's/^/Size: /'
-echo "Files: $(unzip -l "$OUT" | tail -1 | awk '{print $2}')"
+# `|| true` because the archive is already written by this point: a failure in
+# a reporting pipeline must not abort under `set -euo pipefail`.
+du -h "$OUT" | cut -f1 | sed 's/^/Size: /' || true
+echo "Files: $(unzip -l "$OUT" | tail -1 | awk '{print $2}' || true)"
 echo "Includes .git history: $(unzip -l "$OUT" | grep -c '\.git/' || true) git objects"

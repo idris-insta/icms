@@ -71,17 +71,33 @@ fi
 say "MariaDB client OK ($MYSQL_CLI)"
 
 command -v pm2 >/dev/null 2>&1 || die "PM2 is not installed:  npm install -g pm2"
-say "PM2 OK ($(pm2 -v 2>/dev/null | tail -1))"
+# `|| true` on every informational pipeline: under `set -euo pipefail` a failure
+# inside a command substitution aborts the whole script silently, and a version
+# banner is not worth dying for.
+say "PM2 OK ($(pm2 -v 2>/dev/null | tail -1 || true))"
 
 command -v curl >/dev/null 2>&1 || die "curl is not installed."
 
 # ─── secrets / env ───────────────────────────────────────────────────────────
-gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-40}"; }
+# Generate a random alphanumeric string.
+#
+# Deliberately not `tr -dc … </dev/urandom | head -c N`: head closes the pipe
+# the moment it has N bytes, tr dies of SIGPIPE, and under `set -euo pipefail`
+# the resulting exit status of 141 kills the script with no error message at
+# all. Reading a bounded amount *upstream* means no process ever has its pipe
+# closed early. The loop covers the case where filtering leaves too few bytes.
+gen() {
+  local n="${1:-40}" out=""
+  while [ "${#out}" -lt "$n" ]; do
+    out="$out$(LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  printf '%s' "${out:0:n}"
+}
 
 # Reuse existing values so re-running is non-destructive.
 prev() {
   [ -f "$ENV_FILE" ] || return 0
-  sed -n "s/^$1=//p" "$ENV_FILE" | tail -1
+  sed -n "s/^$1=//p" "$ENV_FILE" 2>/dev/null | tail -1 || true
 }
 
 JWT_SECRET="$(prev JWT_SECRET)"; [ -n "$JWT_SECRET" ] || JWT_SECRET="$(gen 48)"
@@ -249,7 +265,9 @@ fi
 say "Application is healthy"
 curl -fsS "http://127.0.0.1:${APP_PORT}/api/health"; echo
 
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# `|| true`: the install has already succeeded, so a failure while working out
+# the LAN address for the banner must not abort under `set -euo pipefail`.
+IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────

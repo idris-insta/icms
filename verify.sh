@@ -8,6 +8,10 @@ export ICMS_BASE="${ICMS_BASE:-http://127.0.0.1:8099}"
 echo "Verifying $ICMS_BASE"
 rc=0
 
+echo "=== installer scripts (unit) ==="
+if bash installer.test.sh; then :; else rc=1; fi
+
+echo
 echo "=== dialect (unit) ==="
 if (cd icms-backend && node dialect.test.js); then :; else rc=1; fi
 for t in smoke race_test search_test json_test authz_test import_test ai_test; do

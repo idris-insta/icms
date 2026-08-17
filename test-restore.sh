@@ -5,7 +5,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 set -a; . ./.env; set +a
 
-DUMP=$(ls -t backups/icms-db-*.sql.gz 2>/dev/null | head -1)
+# `|| true`: head closes the pipe after one line, which can leave ls killed by
+# SIGPIPE — fatal under `set -euo pipefail`.
+DUMP=$(ls -t backups/icms-db-*.sql.gz 2>/dev/null | head -1 || true)
 [ -n "$DUMP" ] || { echo "No dump found — run ./backup.sh first." >&2; exit 1; }
 echo "==> Restoring $DUMP into scratch database icms_restore_test"
 

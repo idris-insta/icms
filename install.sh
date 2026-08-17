@@ -51,7 +51,20 @@ docker info >/dev/null 2>&1 || die \
 say "Docker OK ($($DC version --short 2>/dev/null || echo compose))"
 
 # ─── secrets / .env ──────────────────────────────────────────────────────────
-gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-40}"; }
+# Generate a random alphanumeric string.
+#
+# Deliberately not `tr -dc … </dev/urandom | head -c N`: head closes the pipe
+# the moment it has N bytes, tr dies of SIGPIPE, and under `set -euo pipefail`
+# the resulting exit status of 141 kills the script with no error message at
+# all. Reading a bounded amount *upstream* means no process ever has its pipe
+# closed early. The loop covers the case where filtering leaves too few bytes.
+gen() {
+  local n="${1:-40}" out=""
+  while [ "${#out}" -lt "$n" ]; do
+    out="$out$(LC_ALL=C head -c 256 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  printf '%s' "${out:0:n}"
+}
 
 if [ -f "$ENV_FILE" ]; then
   say "Reusing existing $ENV_FILE (delete it to regenerate secrets)"
@@ -129,7 +142,9 @@ if [ -n "$PG_URL" ]; then
 fi
 
 # ─── done ────────────────────────────────────────────────────────────────────
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# `|| true`: the install has already succeeded, so a failure while working out
+# the LAN address for the banner must not abort under `set -euo pipefail`.
+IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────
